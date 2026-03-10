@@ -1,12 +1,16 @@
 #!/usr/bin/env bun
 import { dirname, resolve } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Command } from "commander";
 import {
   VERSION,
+  benchmarkManifestSchema,
+  benchmarkSuiteReportSchema,
   buildImplementationPlan,
   buildSemanticAnchors,
   extractReportSchema,
+  type BenchmarkCaseResult,
+  type BenchmarkRegionResult,
   type Bounds,
   type LayoutNode
 } from "@one-shot-ui/core";
@@ -166,6 +170,49 @@ program
     }
     if (plan.typography.weak) {
       console.log(`- Typography warning: ${plan.typography.notes.join(" ")}`);
+    }
+  });
+
+program
+  .command("benchmark")
+  .argument("<manifestPath>", "Path to a benchmark manifest JSON file")
+  .option("--json", "Print full JSON report", false)
+  .option("--output <path>", "Path to write the benchmark report JSON")
+  .option("--no-ocr", "Disable OCR text extraction")
+  .action(async (manifestPath, options) => {
+    const report = await runBenchmarkSuite(manifestPath, {
+      disableOcr: options.ocr === false
+    });
+
+    if (options.output) {
+      const outputPath = resolve(options.output);
+      await mkdir(dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, JSON.stringify(report, null, 2), "utf8");
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log(`Cases: ${report.summary.caseCount} total, ${report.summary.comparableCaseCount} comparable`);
+    if (report.summary.averageMismatchRatio != null) {
+      console.log(`Average mismatch ratio: ${(report.summary.averageMismatchRatio * 100).toFixed(2)}%`);
+    }
+    console.log(`Average planning usefulness: ${(report.summary.averagePlanningUsefulness * 100).toFixed(0)}%`);
+    console.log(`Average anchor coverage: ${(report.summary.averageAnchorCoverage * 100).toFixed(0)}%`);
+    if (report.summary.averageRoiReliability != null) {
+      console.log(`Average ROI reliability: ${(report.summary.averageRoiReliability * 100).toFixed(0)}%`);
+    }
+    if (report.summary.averageDomSelectorIssueRatio != null) {
+      console.log(`Average DOM selector issue ratio: ${(report.summary.averageDomSelectorIssueRatio * 100).toFixed(0)}%`);
+    }
+
+    for (const caseResult of report.cases) {
+      const mismatch = caseResult.pixelMismatchRatio == null
+        ? "n/a"
+        : `${(caseResult.pixelMismatchRatio * 100).toFixed(2)}%`;
+      console.log(`- ${caseResult.id}: mismatch ${mismatch}, plan ${(caseResult.planningUsefulness.score * 100).toFixed(0)}%, anchors ${(caseResult.anchorCoverage.realShare * 100).toFixed(0)}%`);
     }
   });
 
@@ -501,6 +548,7 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
 const issueCategoryMap: Record<string, string> = {
   DIMENSION_MISMATCH: "layout",
   PIXEL_DIFFERENCE: "visual",
+  REGION_SEMANTIC_FALLBACK: "region",
   POSITION_MISMATCH: "layout",
   SIZE_MISMATCH: "layout",
   SPACING_MISMATCH: "spacing",
@@ -519,3 +567,189 @@ const issueCategoryMap: Record<string, string> = {
   DOM_SIZE_MISMATCH: "dom-layout",
   DOM_STYLE_MISMATCH: "dom-style"
 };
+
+async function runBenchmarkSuite(manifestPath: string, options: ExtractOptions): Promise<ReturnType<typeof benchmarkSuiteReportSchema.parse>> {
+  const normalizedManifestPath = resolve(manifestPath);
+  const rawManifest = await readFile(normalizedManifestPath, "utf8");
+  const manifest = benchmarkManifestSchema.parse(JSON.parse(rawManifest));
+  const caseResults: BenchmarkCaseResult[] = [];
+
+  for (const benchmarkCase of manifest.cases) {
+    const referencePath = resolve(benchmarkCase.referencePath);
+    const referenceReport = await extractImageReport(referencePath, options);
+    const anchorCoverage = summarizeAnchorCoverage(referenceReport.semanticAnchors ?? [], referenceReport.image.width, referenceReport.image.height);
+    const planningUsefulness = summarizePlanningUsefulness(referenceReport.implementationPlan);
+    const typographyReliability = referenceReport.implementationPlan?.typography.confidence ?? 0;
+
+    let pixelMismatchRatio: number | null = null;
+    let compareIssueCount = 0;
+    let domSelectorIssueRatio: number | null = null;
+    let domIssueCount: number | null = null;
+    const regionResults: BenchmarkRegionResult[] = [];
+
+    if (benchmarkCase.implementationPath) {
+      const implementationPath = resolve(benchmarkCase.implementationPath);
+      const fullCompare = await compareImages(referencePath, implementationPath, {
+        disableOcr: options.disableOcr,
+        top: 20
+      });
+      pixelMismatchRatio = fullCompare.summary.mismatchRatio;
+      compareIssueCount = fullCompare.issues.length;
+
+      if (benchmarkCase.domDiffPath) {
+        try {
+          const isFile = !benchmarkCase.domDiffPath.startsWith("http");
+          const domTree = await extractDomTree({
+            url: isFile ? undefined : benchmarkCase.domDiffPath,
+            filePath: isFile ? resolve(benchmarkCase.domDiffPath) : undefined
+          });
+          const domIssues = compareDomToExtract(domTree, referenceReport.layout, referenceReport.semanticAnchors ?? []);
+          domIssueCount = domIssues.length;
+          domSelectorIssueRatio = domIssues.length === 0
+            ? 0
+            : domIssues.filter((issue) => Boolean(issue.cssSelector)).length / domIssues.length;
+        } catch {
+          domIssueCount = 0;
+          domSelectorIssueRatio = 0;
+        }
+      }
+
+      for (const region of benchmarkCase.regions ?? []) {
+        const regionCompare = await compareImages(referencePath, implementationPath, {
+          disableOcr: options.disableOcr,
+          top: 12,
+          region: region.name
+        });
+        const withinRegionIssueRatio = scoreRegionIssueContainment(regionCompare.issues, referenceReport.semanticAnchors ?? [], region.name);
+        regionResults.push({
+          name: region.name,
+          mismatchRatio: regionCompare.summary.mismatchRatio,
+          issueCount: regionCompare.issues.length,
+          semanticCoverage: regionCompare.summary.focus?.semanticCoverage ?? 0,
+          fallbackToPixelOnly: regionCompare.summary.focus?.fallbackToPixelOnly ?? false,
+          withinRegionIssueRatio,
+          passed: region.maxMismatchRatio == null
+            ? null
+            : regionCompare.summary.mismatchRatio <= region.maxMismatchRatio
+        });
+      }
+    }
+
+    caseResults.push({
+      id: benchmarkCase.id,
+      name: benchmarkCase.name,
+      tags: benchmarkCase.tags ?? [],
+      referencePath,
+      implementationPath: benchmarkCase.implementationPath ? resolve(benchmarkCase.implementationPath) : null,
+      pixelMismatchRatio,
+      compareIssueCount,
+      anchorCoverage,
+      planningUsefulness,
+      typographyReliability,
+      domDiffUsefulness: {
+        selectorIssueRatio: domSelectorIssueRatio,
+        issueCount: domIssueCount
+      },
+      regions: regionResults
+    });
+  }
+
+  const comparableCases = caseResults.filter((caseResult) => caseResult.pixelMismatchRatio != null);
+  const roiCases = caseResults.flatMap((caseResult) => caseResult.regions).filter((region) => region.withinRegionIssueRatio != null);
+  const domCases = caseResults.map((caseResult) => caseResult.domDiffUsefulness.selectorIssueRatio).filter((value): value is number => value != null);
+
+  return benchmarkSuiteReportSchema.parse({
+    version: VERSION,
+    generatedAt: new Date().toISOString(),
+    manifestPath: normalizedManifestPath,
+    summary: {
+      caseCount: caseResults.length,
+      comparableCaseCount: comparableCases.length,
+      averageMismatchRatio: average(comparableCases.map((caseResult) => caseResult.pixelMismatchRatio!)),
+      averagePlanningUsefulness: average(caseResults.map((caseResult) => caseResult.planningUsefulness.score)) ?? 0,
+      averageTypographyReliability: average(caseResults.map((caseResult) => caseResult.typographyReliability)) ?? 0,
+      averageAnchorCoverage: average(caseResults.map((caseResult) => caseResult.anchorCoverage.realShare)) ?? 0,
+      averageRoiReliability: average(roiCases.map((region) => region.withinRegionIssueRatio!)),
+      averageDomSelectorIssueRatio: average(domCases)
+    },
+    cases: caseResults
+  });
+}
+
+function summarizeAnchorCoverage(
+  anchors: Array<{ nodeId: string | null; bounds: Bounds }>,
+  pageWidth: number,
+  pageHeight: number
+) {
+  const realAnchors = anchors.filter((anchor) => anchor.nodeId !== null);
+  const syntheticAnchors = anchors.filter((anchor) => anchor.nodeId === null);
+  const pageArea = Math.max(1, pageWidth * pageHeight);
+  const realAreaRatio = Math.min(1, realAnchors.reduce((sum, anchor) => sum + (anchor.bounds.width * anchor.bounds.height), 0) / pageArea);
+  const total = Math.max(1, anchors.length);
+  return {
+    realCount: realAnchors.length,
+    syntheticCount: syntheticAnchors.length,
+    realAreaRatio,
+    realShare: realAnchors.length / total
+  };
+}
+
+function summarizePlanningUsefulness(plan: Awaited<ReturnType<typeof extractImageReport>>["implementationPlan"]) {
+  const nodeCount = plan?.nodes.length ?? 0;
+  const cssPrimitiveCount = plan?.cssPrimitives.length ?? 0;
+  const repeatedPatternCount = plan?.repeatedPatterns.length ?? 0;
+  const typographyConfidence = plan?.typography.confidence ?? 0;
+  const strategyScore = plan?.page.primaryStrategy && plan.page.primaryStrategy !== "unknown" ? 0.2 : 0;
+  const score = Math.min(
+    1,
+    strategyScore +
+      Math.min(0.35, nodeCount / 20) +
+      Math.min(0.2, cssPrimitiveCount / 10) +
+      Math.min(0.15, repeatedPatternCount / 8) +
+      Math.min(0.1, typographyConfidence * 0.1) +
+      (plan?.page.notes.length ? 0.1 : 0)
+  );
+
+  return {
+    score,
+    nodeCount,
+    cssPrimitiveCount,
+    repeatedPatternCount,
+    typographyConfidence
+  };
+}
+
+function scoreRegionIssueContainment(
+  issues: Array<{ anchorName?: string }>,
+  anchors: Array<{ name: string; parentId: string | null; id: string }>,
+  regionName: string
+): number | null {
+  if (issues.length === 0) {
+    return null;
+  }
+  const region = anchors.find((anchor) => anchor.name.toLowerCase() === regionName.toLowerCase());
+  if (!region) {
+    return null;
+  }
+  const relatedNames = new Set([
+    region.name.toLowerCase(),
+    ...anchors
+      .filter((anchor) => anchor.parentId === region.id)
+      .map((anchor) => anchor.name.toLowerCase())
+  ]);
+  const matchingIssues = issues.filter((issue) => {
+    if (!issue.anchorName) {
+      return false;
+    }
+    const normalized = issue.anchorName.toLowerCase();
+    return relatedNames.has(normalized) || normalized.includes(region.name.toLowerCase());
+  });
+  return matchingIssues.length / issues.length;
+}
+
+function average(values: number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}

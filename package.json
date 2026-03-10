@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "extract": "bun packages/cli/src/index.ts extract",
     "compare": "bun packages/cli/src/index.ts compare",
-    "capture": "bun packages/cli/src/index.ts capture"
+    "capture": "bun packages/cli/src/index.ts capture",
+    "benchmark": "bun packages/cli/src/index.ts benchmark"
   },
   "dependencies": {
     "commander": "^14.0.1",

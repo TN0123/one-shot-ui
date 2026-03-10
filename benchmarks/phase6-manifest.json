@@ -1,0 +1,27 @@
+{
+  "version": "0.4.0",
+  "cases": [
+    {
+      "id": "phase5-dashboard",
+      "name": "Phase 5 dashboard fixture",
+      "referencePath": "testing/out/reference.png",
+      "implementationPath": "testing/out/impl-phase5.png",
+      "domDiffPath": "testing/impl/index.html",
+      "tags": ["dashboard", "dark", "text-heavy", "standing"],
+      "notes": [
+        "Standing benchmark case introduced in Phase 6.",
+        "Tracks anchor coverage, ROI compare quality, and DOM issue usefulness."
+      ],
+      "regions": [
+        {
+          "name": "summary panel",
+          "maxMismatchRatio": 0.03
+        },
+        {
+          "name": "calendar board",
+          "maxMismatchRatio": 0.03
+        }
+      ]
+    }
+  ]
+}

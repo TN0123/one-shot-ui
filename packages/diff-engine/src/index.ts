@@ -27,6 +27,15 @@ export interface CompareImagesOptions {
   crop?: Bounds;
 }
 
+interface FocusDiagnostics {
+  requestedRegion: string | null;
+  bounds: Bounds | null;
+  semanticCoverage: number;
+  realAnchorCount: number;
+  syntheticAnchorCount: number;
+  fallbackToPixelOnly: boolean;
+}
+
 export async function compareImages(
   referencePath: string,
   implementationPath: string,
@@ -56,6 +65,7 @@ export async function compareImages(
     height: referenceImage.height
   });
   const focusBounds = resolveFocusBounds(options.region, options.crop, referenceAnchors, referenceImage.width, referenceImage.height);
+  const focusDiagnostics = analyzeFocusCoverage(referenceAnchors, focusBounds, options.region);
   const referenceLayout = filterNodesByBounds(fullReferenceLayout, focusBounds);
   const implementationLayout = filterNodesByBounds(fullImplementationLayout, focusBounds);
   const scopedReferenceText = filterTextByBounds(referenceText, focusBounds);
@@ -125,6 +135,21 @@ export async function compareImages(
     });
   }
 
+  if (focusDiagnostics.fallbackToPixelOnly) {
+    issues.push({
+      code: "REGION_SEMANTIC_FALLBACK",
+      severity: "medium",
+      anchorName: options.region,
+      message: `Semantic coverage inside ${options.region} is too thin for trusted anchor-level issues.`,
+      suggestedFix: `Falling back to scoped pixel diff only. Coverage is ${(focusDiagnostics.semanticCoverage * 100).toFixed(1)}% across ${focusDiagnostics.realAnchorCount} real anchors.`,
+      reference: {
+        semanticCoverage: focusDiagnostics.semanticCoverage,
+        realAnchorCount: focusDiagnostics.realAnchorCount,
+        syntheticAnchorCount: focusDiagnostics.syntheticAnchorCount
+      }
+    });
+  }
+
   if (referenceLayout.length !== implementationLayout.length) {
     issues.push({
       code: "LAYOUT_COUNT_MISMATCH",
@@ -148,52 +173,53 @@ export async function compareImages(
   const layoutMatches = matchLayoutNodes(referenceLayout, implementationLayout);
   const matchedImplementationIds = new Set(layoutMatches.map((match) => match.implementation.id));
 
-  for (const match of layoutMatches) {
-    issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors));
-  }
-
-  for (const node of referenceLayout) {
-    if (layoutMatches.some((match) => match.reference.id === node.id)) {
-      continue;
+  if (!focusDiagnostics.fallbackToPixelOnly) {
+    for (const match of layoutMatches) {
+      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors));
     }
-    const anchor = resolveAnchor(referenceAnchors, node);
-    issues.push({
-      code: "MISSING_NODE",
-      nodeId: node.id,
-      anchorId: anchor?.id,
-      anchorName: anchor?.name,
-      contextPath: buildContextPath(anchor, referenceAnchors),
-      severity: "high",
-      message: `${describeAnchor(anchor, node.id)} is missing from the implementation.`,
-      suggestedFix: `Add the missing ${describeAnchor(anchor, "region")} using the same fill, size, and border treatment as the reference.`,
-      reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
-    });
-  }
 
-  for (const node of implementationLayout) {
-    if (matchedImplementationIds.has(node.id)) {
-      continue;
+    for (const node of referenceLayout) {
+      if (layoutMatches.some((match) => match.reference.id === node.id)) {
+        continue;
+      }
+      const anchor = resolveAnchor(referenceAnchors, node);
+      issues.push({
+        code: "MISSING_NODE",
+        nodeId: node.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath: buildContextPath(anchor, referenceAnchors),
+        severity: "high",
+        message: `${describeAnchor(anchor, node.id)} is missing from the implementation.`,
+        suggestedFix: `Add the missing ${describeAnchor(anchor, "region")} using the same fill, size, and border treatment as the reference.`,
+        reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
+      });
     }
-    // Noise reduction: filter small EXTRA_NODE regions contained within matched nodes
-    if (isSubElementArtifact(node, layoutMatches)) {
-      continue;
-    }
-    const anchor = findClosestAnchor(referenceAnchors, node.bounds);
-    issues.push({
-      code: "EXTRA_NODE",
-      nodeId: node.id,
-      anchorId: anchor?.id,
-      anchorName: anchor?.name,
-      contextPath: buildContextPath(anchor, referenceAnchors),
-      severity: "medium",
-      message: `The implementation has an extra surface near ${describeAnchor(anchor, "this area")}.`,
-      suggestedFix: "Remove the extra surface or merge it into an existing component.",
-      implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
-    });
-  }
 
-  issues.push(...compareSpacing(referenceSpacing, implementationSpacing, layoutMatches, referenceAnchors));
-  issues.push(...compareText(scopedReferenceText, scopedImplementationText));
+    for (const node of implementationLayout) {
+      if (matchedImplementationIds.has(node.id)) {
+        continue;
+      }
+      if (isSubElementArtifact(node, layoutMatches)) {
+        continue;
+      }
+      const anchor = findClosestAnchor(referenceAnchors, node.bounds);
+      issues.push({
+        code: "EXTRA_NODE",
+        nodeId: node.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath: buildContextPath(anchor, referenceAnchors),
+        severity: "medium",
+        message: `The implementation has an extra surface near ${describeAnchor(anchor, "this area")}.`,
+        suggestedFix: "Remove the extra surface or merge it into an existing component.",
+        implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
+      });
+    }
+
+    issues.push(...compareSpacing(referenceSpacing, implementationSpacing, layoutMatches, referenceAnchors));
+    issues.push(...compareText(scopedReferenceText, scopedImplementationText));
+  }
 
   let normalizedHeatmapPath: string | null = null;
   if (options.heatmapPath) {
@@ -214,13 +240,48 @@ export async function compareImages(
       mismatchRatio,
       matchedLayoutNodes: layoutMatches.length,
       widthDelta: implementationImage.width - referenceImage.width,
-      heightDelta: implementationImage.height - referenceImage.height
+      heightDelta: implementationImage.height - referenceImage.height,
+      focus: focusDiagnostics
     },
     issues: filteredIssues,
     artifacts: {
       heatmapPath: normalizedHeatmapPath
     }
   });
+}
+
+function analyzeFocusCoverage(
+  anchors: SemanticAnchor[],
+  focusBounds: Bounds | undefined,
+  regionName: string | undefined
+): FocusDiagnostics {
+  if (!focusBounds) {
+    return {
+      requestedRegion: regionName ?? null,
+      bounds: null,
+      semanticCoverage: 1,
+      realAnchorCount: anchors.filter((anchor) => anchor.nodeId !== null).length,
+      syntheticAnchorCount: anchors.filter((anchor) => anchor.nodeId === null).length,
+      fallbackToPixelOnly: false
+    };
+  }
+
+  const overlappingAnchors = anchors.filter((anchor) => overlaps(anchor.bounds, focusBounds));
+  const realAnchors = overlappingAnchors.filter((anchor) => anchor.nodeId !== null);
+  const syntheticAnchors = overlappingAnchors.filter((anchor) => anchor.nodeId === null);
+  const focusArea = Math.max(1, focusBounds.width * focusBounds.height);
+  const realCoverageArea = realAnchors.reduce((sum, anchor) => sum + overlapArea(anchor.bounds, focusBounds), 0);
+  const semanticCoverage = clamp(realCoverageArea / focusArea, 0, 1);
+  const fallbackToPixelOnly = Boolean(regionName) && (realAnchors.length < 2 || semanticCoverage < 0.12);
+
+  return {
+    requestedRegion: regionName ?? null,
+    bounds: focusBounds,
+    semanticCoverage,
+    realAnchorCount: realAnchors.length,
+    syntheticAnchorCount: syntheticAnchors.length,
+    fallbackToPixelOnly
+  };
 }
 
 /**
@@ -863,11 +924,19 @@ function overlaps(a: Bounds, b: Bounds): boolean {
 }
 
 function overlapScore(a: Bounds, b: Bounds): number {
-  const overlapX = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
-  const overlapY = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
-  const overlapArea = overlapX * overlapY;
+  const overlapArea = computeOverlapArea(a, b);
   const unionArea = a.width * a.height + b.width * b.height - overlapArea;
   return unionArea === 0 ? 0 : overlapArea / unionArea;
+}
+
+function overlapArea(a: Bounds, b: Bounds): number {
+  return computeOverlapArea(a, b);
+}
+
+function computeOverlapArea(a: Bounds, b: Bounds): number {
+  const overlapX = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const overlapY = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return overlapX * overlapY;
 }
 
 function clamp(value: number, min: number, max: number): number {

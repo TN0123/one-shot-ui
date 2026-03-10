@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 export const boundsSchema = z.object({
   x: z.number().nonnegative(),
@@ -198,6 +198,7 @@ export const compareIssueSchema = z.object({
   code: z.enum([
     "DIMENSION_MISMATCH",
     "PIXEL_DIFFERENCE",
+    "REGION_SEMANTIC_FALLBACK",
     "POSITION_MISMATCH",
     "SIZE_MISMATCH",
     "SPACING_MISMATCH",
@@ -246,12 +247,97 @@ export const compareReportSchema = z.object({
     mismatchRatio: z.number().min(0).max(1),
     matchedLayoutNodes: z.number().int().nonnegative(),
     widthDelta: z.number().int(),
-    heightDelta: z.number().int()
+    heightDelta: z.number().int(),
+    focus: z.object({
+      requestedRegion: z.string().nullable(),
+      bounds: boundsSchema.nullable(),
+      semanticCoverage: z.number().min(0).max(1),
+      realAnchorCount: z.number().int().nonnegative(),
+      syntheticAnchorCount: z.number().int().nonnegative(),
+      fallbackToPixelOnly: z.boolean()
+    }).optional()
   }),
   issues: z.array(compareIssueSchema),
   artifacts: z.object({
     heatmapPath: z.string().nullable()
   })
+});
+
+export const benchmarkCaseRegionSchema = z.object({
+  name: z.string(),
+  maxMismatchRatio: z.number().min(0).max(1).optional()
+});
+
+export const benchmarkCaseSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  referencePath: z.string(),
+  implementationPath: z.string().optional(),
+  domDiffPath: z.string().optional(),
+  notes: z.array(z.string()).optional(),
+  tags: z.array(z.string()).optional(),
+  regions: z.array(benchmarkCaseRegionSchema).optional()
+});
+
+export const benchmarkManifestSchema = z.object({
+  version: z.string(),
+  cases: z.array(benchmarkCaseSchema).min(1)
+});
+
+export const benchmarkRegionResultSchema = z.object({
+  name: z.string(),
+  mismatchRatio: z.number().min(0).max(1).nullable(),
+  issueCount: z.number().int().nonnegative(),
+  semanticCoverage: z.number().min(0).max(1),
+  fallbackToPixelOnly: z.boolean(),
+  withinRegionIssueRatio: z.number().min(0).max(1).nullable(),
+  passed: z.boolean().nullable()
+});
+
+export const benchmarkCaseResultSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  referencePath: z.string(),
+  implementationPath: z.string().nullable(),
+  pixelMismatchRatio: z.number().min(0).max(1).nullable(),
+  compareIssueCount: z.number().int().nonnegative(),
+  anchorCoverage: z.object({
+    realCount: z.number().int().nonnegative(),
+    syntheticCount: z.number().int().nonnegative(),
+    realAreaRatio: z.number().min(0).max(1),
+    realShare: z.number().min(0).max(1)
+  }),
+  planningUsefulness: z.object({
+    score: z.number().min(0).max(1),
+    nodeCount: z.number().int().nonnegative(),
+    cssPrimitiveCount: z.number().int().nonnegative(),
+    repeatedPatternCount: z.number().int().nonnegative(),
+    typographyConfidence: z.number().min(0).max(1)
+  }),
+  typographyReliability: z.number().min(0).max(1),
+  domDiffUsefulness: z.object({
+    selectorIssueRatio: z.number().min(0).max(1).nullable(),
+    issueCount: z.number().int().nonnegative().nullable()
+  }),
+  regions: z.array(benchmarkRegionResultSchema)
+});
+
+export const benchmarkSuiteReportSchema = z.object({
+  version: z.string(),
+  generatedAt: z.string(),
+  manifestPath: z.string(),
+  summary: z.object({
+    caseCount: z.number().int().positive(),
+    comparableCaseCount: z.number().int().nonnegative(),
+    averageMismatchRatio: z.number().min(0).max(1).nullable(),
+    averagePlanningUsefulness: z.number().min(0).max(1),
+    averageTypographyReliability: z.number().min(0).max(1),
+    averageAnchorCoverage: z.number().min(0).max(1),
+    averageRoiReliability: z.number().min(0).max(1).nullable(),
+    averageDomSelectorIssueRatio: z.number().min(0).max(1).nullable()
+  }),
+  cases: z.array(benchmarkCaseResultSchema)
 });
 
 export const captureOptionsSchema = z.object({
@@ -296,6 +382,12 @@ export type CompareOptions = z.infer<typeof compareOptionsSchema>;
 export type CompareReport = z.infer<typeof compareReportSchema>;
 export type CaptureOptions = z.infer<typeof captureOptionsSchema>;
 export type CaptureResult = z.infer<typeof captureResultSchema>;
+export type BenchmarkCaseRegion = z.infer<typeof benchmarkCaseRegionSchema>;
+export type BenchmarkCase = z.infer<typeof benchmarkCaseSchema>;
+export type BenchmarkManifest = z.infer<typeof benchmarkManifestSchema>;
+export type BenchmarkRegionResult = z.infer<typeof benchmarkRegionResultSchema>;
+export type BenchmarkCaseResult = z.infer<typeof benchmarkCaseResultSchema>;
+export type BenchmarkSuiteReport = z.infer<typeof benchmarkSuiteReportSchema>;
 
 export function buildSemanticAnchors(
   nodes: LayoutNode[],

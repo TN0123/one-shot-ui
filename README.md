@@ -10,9 +10,9 @@ Instead, `one-shot-ui` aims to extract deterministic, machine-readable UI data f
 
 ## Status
 
-The repo is currently in Phase 2 of the roadmap.
+The repo now includes the roadmap work through Phase 6 in incremental form.
 
-Phase 2 now includes:
+Implemented surfaces include:
 
 - CLI scaffold
 - image loading and preprocessing
@@ -26,6 +26,9 @@ Phase 2 now includes:
 - pixel diff and heatmap generation
 - actionable compare issues for position, size, spacing, color, radius, and text heuristics
 - typed JSON contracts
+- semantic anchors and implementation planning output
+- region-focused compare with pixel-only fallback when semantic coverage is thin
+- a Phase 6 benchmark command and standing benchmark manifest
 
 Roadmap details are in roadmap.md.
 
@@ -40,12 +43,16 @@ The long-term goal is to help agents answer questions like:
 
 ## Current CLI
 
-The current CLI exposes three commands:
+The current CLI exposes these commands:
 
 ```sh
 bun packages/cli/src/index.ts extract <imagePath> --json
 bun packages/cli/src/index.ts compare <referencePath> <implementationPath> --json --heatmap <path>
 bun packages/cli/src/index.ts capture --file <htmlPath> --output <pngPath>
+bun packages/cli/src/index.ts plan <imagePath> --json
+bun packages/cli/src/index.ts tokens <imagePath> --json
+bun packages/cli/src/index.ts suggest-fixes <referencePath> <implementationPath> --json
+bun packages/cli/src/index.ts benchmark benchmarks/phase6-manifest.json --json
 ```
 
 ## Getting started
@@ -104,9 +111,10 @@ testing/            static testing fixture and outputs
 - OCR is currently opt-in via `ONE_SHOT_UI_ENABLE_OCR=1`.
 - Layout detection is still intentionally coarse and region-oriented rather than a full semantic tree.
 - Border radius, spacing, typography, and component outputs are deterministic heuristics, not model-backed vision.
-- `compare` now produces actionable machine-readable issues, but richer shadow, gradient, and font-family analysis remain Phase 3 work.
+- `compare --region` now reports when it must fall back to scoped pixel-only output because semantic coverage is too thin.
+- Benchmark scoring is intentionally lightweight; it is meant to track regressions over time rather than claim ground-truth semantic accuracy.
 
-See phase1.md for the build plan and phase1-agent-feedback.md for implementation feedback from using the Phase 1 CLI in practice.
+See [roadmap.md](/Users/tanaynaik/Desktop/one-shot-ui/roadmap.md), [docs/benchmarking.md](/Users/tanaynaik/Desktop/one-shot-ui/docs/benchmarking.md), and [docs/agent-integration.md](/Users/tanaynaik/Desktop/one-shot-ui/docs/agent-integration.md).
 
 ## License
 
