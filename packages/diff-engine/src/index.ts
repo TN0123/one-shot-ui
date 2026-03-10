@@ -2,7 +2,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-import { VERSION, compareReportSchema, type CompareIssue, type CompareOptions, type LayoutNode, type TextBlock } from "@one-shot-ui/core";
+import {
+  VERSION,
+  buildSemanticAnchors,
+  compareReportSchema,
+  type Bounds,
+  type CompareIssue,
+  type LayoutNode,
+  type SemanticAnchor,
+  type TextBlock
+} from "@one-shot-ui/core";
 import { detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
@@ -14,6 +23,8 @@ export interface CompareImagesOptions {
   top?: number;
   confidenceThreshold?: number;
   disableOcr?: boolean;
+  region?: string;
+  crop?: Bounds;
 }
 
 export async function compareImages(
@@ -38,19 +49,35 @@ export async function compareImages(
 
   const refBg = detectBackgroundColor(referenceImage);
   const implBg = detectBackgroundColor(implementationImage);
-  const referenceLayout = clusterComponents(enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)).nodes;
-  const implementationLayout = clusterComponents(enrichLayoutNodes(implementationImage, detectLayoutBoxes(implementationImage), implBg)).nodes;
+  const fullReferenceLayout = clusterComponents(enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)).nodes;
+  const fullImplementationLayout = clusterComponents(enrichLayoutNodes(implementationImage, detectLayoutBoxes(implementationImage), implBg)).nodes;
+  const referenceAnchors = buildSemanticAnchors(fullReferenceLayout, referenceText, {
+    width: referenceImage.width,
+    height: referenceImage.height
+  });
+  const focusBounds = resolveFocusBounds(options.region, options.crop, referenceAnchors, referenceImage.width, referenceImage.height);
+  const referenceLayout = filterNodesByBounds(fullReferenceLayout, focusBounds);
+  const implementationLayout = filterNodesByBounds(fullImplementationLayout, focusBounds);
+  const scopedReferenceText = filterTextByBounds(referenceText, focusBounds);
+  const scopedImplementationText = filterTextByBounds(implementationText, focusBounds);
   const referenceSpacing = measureSpacing(referenceLayout);
   const implementationSpacing = measureSpacing(implementationLayout);
 
-  const width = Math.min(referenceImage.width, implementationImage.width);
-  const height = Math.min(referenceImage.height, implementationImage.height);
+  const width = focusBounds
+    ? Math.max(0, Math.min(focusBounds.width, referenceImage.width - focusBounds.x, implementationImage.width - focusBounds.x))
+    : Math.min(referenceImage.width, implementationImage.width);
+  const height = focusBounds
+    ? Math.max(0, Math.min(focusBounds.height, referenceImage.height - focusBounds.y, implementationImage.height - focusBounds.y))
+    : Math.min(referenceImage.height, implementationImage.height);
   const referencePng = new PNG({ width, height });
   const implementationPng = new PNG({ width, height });
+  const startX = focusBounds?.x ?? 0;
+  const startY = focusBounds?.y ?? 0;
 
   for (let y = 0; y < height; y++) {
-    const referenceRowOffset = y * referenceImage.width * referenceImage.channels;
-    const implementationRowOffset = y * implementationImage.width * implementationImage.channels;
+    const sourceY = startY + y;
+    const referenceRowOffset = (sourceY * referenceImage.width + startX) * referenceImage.channels;
+    const implementationRowOffset = (sourceY * implementationImage.width + startX) * implementationImage.channels;
     const pngRowOffset = y * width * 4;
 
     referencePng.data.set(
@@ -102,19 +129,19 @@ export async function compareImages(
     issues.push({
       code: "LAYOUT_COUNT_MISMATCH",
       severity: "medium",
-      message: "Detected layout region counts do not match.",
+      message: describeScope(`Detected layout region counts do not match`, focusBounds, options.region),
       reference: { layoutNodes: referenceLayout.length },
       implementation: { layoutNodes: implementationLayout.length }
     });
   }
 
-  if (referenceText.length !== implementationText.length) {
+  if (scopedReferenceText.length !== scopedImplementationText.length) {
     issues.push({
       code: "TEXT_COUNT_MISMATCH",
       severity: "low",
-      message: "OCR text block counts do not match.",
-      reference: { textBlocks: referenceText.length },
-      implementation: { textBlocks: implementationText.length }
+      message: describeScope("OCR text block counts do not match", focusBounds, options.region),
+      reference: { textBlocks: scopedReferenceText.length },
+      implementation: { textBlocks: scopedImplementationText.length }
     });
   }
 
@@ -122,19 +149,23 @@ export async function compareImages(
   const matchedImplementationIds = new Set(layoutMatches.map((match) => match.implementation.id));
 
   for (const match of layoutMatches) {
-    issues.push(...compareMatchedNodes(match.reference, match.implementation));
+    issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors));
   }
 
   for (const node of referenceLayout) {
     if (layoutMatches.some((match) => match.reference.id === node.id)) {
       continue;
     }
+    const anchor = resolveAnchor(referenceAnchors, node);
     issues.push({
       code: "MISSING_NODE",
       nodeId: node.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath: buildContextPath(anchor, referenceAnchors),
       severity: "high",
-      message: `Reference node ${node.id} has no corresponding implementation node.`,
-      suggestedFix: `Add a region near x=${node.bounds.x}, y=${node.bounds.y} with size ${node.bounds.width}x${node.bounds.height}.`,
+      message: `${describeAnchor(anchor, node.id)} is missing from the implementation.`,
+      suggestedFix: `Add the missing ${describeAnchor(anchor, "region")} using the same fill, size, and border treatment as the reference.`,
       reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
     });
   }
@@ -147,18 +178,22 @@ export async function compareImages(
     if (isSubElementArtifact(node, layoutMatches)) {
       continue;
     }
+    const anchor = findClosestAnchor(referenceAnchors, node.bounds);
     issues.push({
       code: "EXTRA_NODE",
       nodeId: node.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath: buildContextPath(anchor, referenceAnchors),
       severity: "medium",
-      message: `Implementation node ${node.id} does not match any reference node.`,
+      message: `The implementation has an extra surface near ${describeAnchor(anchor, "this area")}.`,
       suggestedFix: "Remove the extra surface or merge it into an existing component.",
       implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
     });
   }
 
-  issues.push(...compareSpacing(referenceSpacing, implementationSpacing, layoutMatches));
-  issues.push(...compareText(referenceText, implementationText));
+  issues.push(...compareSpacing(referenceSpacing, implementationSpacing, layoutMatches, referenceAnchors));
+  issues.push(...compareText(scopedReferenceText, scopedImplementationText));
 
   let normalizedHeatmapPath: string | null = null;
   if (options.heatmapPath) {
@@ -304,17 +339,23 @@ function matchLayoutNodes(referenceNodes: LayoutNode[], implementationNodes: Lay
   return matches;
 }
 
-function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode): CompareIssue[] {
+function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[]): CompareIssue[] {
   const issues: CompareIssue[] = [];
+  const anchor = resolveAnchor(anchors, reference);
+  const anchorName = describeAnchor(anchor, reference.id);
+  const contextPath = buildContextPath(anchor, anchors);
   const deltaX = implementation.bounds.x - reference.bounds.x;
   const deltaY = implementation.bounds.y - reference.bounds.y;
   if (Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6) {
     issues.push({
       code: "POSITION_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: Math.abs(deltaX) > 16 || Math.abs(deltaY) > 16 ? "high" : "medium",
-      message: `Node ${reference.id} is offset from the reference position.`,
-      suggestedFix: `Move the element ${signedPixels(-deltaX)} horizontally and ${signedPixels(-deltaY)} vertically.`,
+      message: `${anchorName} is offset from the reference.`,
+      suggestedFix: buildRelativePositionFix(deltaX, deltaY),
       reference: { x: reference.bounds.x, y: reference.bounds.y },
       implementation: { x: implementation.bounds.x, y: implementation.bounds.y }
     });
@@ -326,9 +367,12 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     issues.push({
       code: "SIZE_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: Math.abs(widthDelta) > 16 || Math.abs(heightDelta) > 16 ? "high" : "medium",
-      message: `Node ${reference.id} size differs from the reference.`,
-      suggestedFix: `Adjust the element size by ${signedPixels(-widthDelta)} width and ${signedPixels(-heightDelta)} height.`,
+      message: `${anchorName} size differs from the reference.`,
+      suggestedFix: buildRelativeSizeFix(widthDelta, heightDelta, reference.bounds),
       reference: { width: reference.bounds.width, height: reference.bounds.height },
       implementation: { width: implementation.bounds.width, height: implementation.bounds.height }
     });
@@ -340,8 +384,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
       issues.push({
         code: "BORDER_RADIUS_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath,
         severity: Math.abs(radiusDelta) >= 6 ? "medium" : "low",
-        message: `Node ${reference.id} border radius differs from the reference.`,
+        message: `${anchorName} border radius differs from the reference.`,
         suggestedFix: `Set border-radius to ${reference.borderRadius}px.`,
         reference: { borderRadius: reference.borderRadius },
         implementation: { borderRadius: implementation.borderRadius }
@@ -355,8 +402,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
       issues.push({
         code: "COLOR_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath,
         severity: colorDelta >= 64 ? "medium" : "low",
-        message: `Node ${reference.id} fill color differs from the reference.`,
+        message: `${anchorName} fill color differs from the reference.`,
         suggestedFix: `Change the fill color to ${reference.fill}.`,
         reference: { fill: reference.fill },
         implementation: { fill: implementation.fill }
@@ -369,8 +419,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     issues.push({
       code: "SHADOW_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: "medium",
-      message: `Node ${reference.id} is missing a shadow present in the reference.`,
+      message: `${anchorName} is missing a shadow present in the reference.`,
       suggestedFix: `Add box-shadow: ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
       reference: { shadow: reference.shadow },
       implementation: { shadow: null }
@@ -379,8 +432,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     issues.push({
       code: "SHADOW_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: "low",
-      message: `Node ${reference.id} has an extra shadow not present in the reference.`,
+      message: `${anchorName} has an extra shadow not present in the reference.`,
       suggestedFix: "Remove the box-shadow from this element.",
       reference: { shadow: null },
       implementation: { shadow: implementation.shadow }
@@ -394,8 +450,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
       issues.push({
         code: "SHADOW_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath,
         severity: blurDelta >= 6 || offsetDelta >= 6 ? "medium" : "low",
-        message: `Node ${reference.id} shadow differs from the reference.`,
+        message: `${anchorName} shadow differs from the reference.`,
         suggestedFix: `Set box-shadow to ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
         reference: { shadow: reference.shadow },
         implementation: { shadow: implementation.shadow }
@@ -410,8 +469,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     issues.push({
       code: "GRADIENT_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: "medium",
-      message: `Node ${reference.id} is missing a gradient present in the reference.`,
+      message: `${anchorName} is missing a gradient present in the reference.`,
       suggestedFix: `Add background: ${reference.gradient.type}-gradient(${direction}${stops}).`,
       reference: { gradient: reference.gradient },
       implementation: { gradient: null }
@@ -420,8 +482,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     issues.push({
       code: "GRADIENT_MISMATCH",
       nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
       severity: "low",
-      message: `Node ${reference.id} has a gradient not present in the reference.`,
+      message: `${anchorName} has a gradient not present in the reference.`,
       suggestedFix: "Replace the gradient with a solid fill.",
       reference: { gradient: null },
       implementation: { gradient: implementation.gradient }
@@ -444,8 +509,11 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
       issues.push({
         code: "GRADIENT_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath,
         severity: colorDelta > 96 ? "medium" : "low",
-        message: `Node ${reference.id} gradient differs from the reference.`,
+        message: `${anchorName} gradient differs from the reference.`,
         suggestedFix: `Set background to ${reference.gradient.type}-gradient(${direction}${stops}).`,
         reference: { gradient: reference.gradient },
         implementation: { gradient: implementation.gradient }
@@ -459,7 +527,8 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
 function compareSpacing(
   referenceSpacing: ReturnType<typeof measureSpacing>,
   implementationSpacing: ReturnType<typeof measureSpacing>,
-  matches: Array<{ reference: LayoutNode; implementation: LayoutNode }>
+  matches: Array<{ reference: LayoutNode; implementation: LayoutNode }>,
+  anchors: SemanticAnchor[]
 ): CompareIssue[] {
   const mappedIds = new Map(matches.map((match) => [match.reference.id, match.implementation.id]));
   const implementationLookup = new Map(
@@ -490,9 +559,12 @@ function compareSpacing(
     issues.push({
       code: "SPACING_MISMATCH",
       nodeId: measurement.fromId,
+      anchorId: resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference)?.id,
+      anchorName: resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference)?.name,
+      contextPath: buildSpacingContext(measurement, anchors),
       severity: Math.abs(delta) >= 16 ? "medium" : "low",
-      message: `Spacing between ${measurement.fromId} and ${measurement.toId} differs from the reference.`,
-      suggestedFix: `Change the ${measurement.axis} gap to ${measurement.distance}px.`,
+      message: `Spacing between ${describeAnchor(resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference), measurement.fromId)} and ${describeAnchor(resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.toId)?.reference), measurement.toId)} differs from the reference.`,
+      suggestedFix: buildSpacingFix(measurement.axis, delta, measurement.distance),
       reference: { distance: measurement.distance, alignment: measurement.alignment },
       implementation: { distance: implementationMeasurement.distance, alignment: implementationMeasurement.alignment }
     });
@@ -651,6 +723,155 @@ function signedPixels(value: number) {
     return "0px";
   }
   return `${value > 0 ? "+" : ""}${value}px`;
+}
+
+function buildRelativePositionFix(deltaX: number, deltaY: number): string {
+  const suggestions: string[] = [];
+  if (Math.abs(deltaX) > 6) {
+    suggestions.push(`${deltaX > 0 ? "move it left" : "move it right"} by ${Math.abs(deltaX)}px`);
+  }
+  if (Math.abs(deltaY) > 6) {
+    suggestions.push(`${deltaY > 0 ? "move it up" : "move it down"} by ${Math.abs(deltaY)}px`);
+  }
+  return suggestions.join(" and ");
+}
+
+function buildRelativeSizeFix(widthDelta: number, heightDelta: number, referenceBounds: Bounds): string {
+  const suggestions: string[] = [];
+  if (Math.abs(widthDelta) > 6) {
+    suggestions.push(`${widthDelta > 0 ? "narrow it" : "widen it"} by ${Math.abs(widthDelta)}px toward ${referenceBounds.width}px`);
+  }
+  if (Math.abs(heightDelta) > 6) {
+    suggestions.push(`${heightDelta > 0 ? "reduce its height" : "increase its height"} by ${Math.abs(heightDelta)}px toward ${referenceBounds.height}px`);
+  }
+  return suggestions.join(" and ");
+}
+
+function buildSpacingFix(axis: "horizontal" | "vertical", delta: number, target: number): string {
+  const direction = delta > 0 ? "reduce" : "increase";
+  return `${direction} the ${axis} gap by ${Math.abs(delta)}px so it lands near ${target}px.`;
+}
+
+function resolveFocusBounds(
+  region: string | undefined,
+  crop: Bounds | undefined,
+  anchors: SemanticAnchor[],
+  width: number,
+  height: number
+): Bounds | undefined {
+  if (crop) {
+    return crop;
+  }
+  if (!region) {
+    return undefined;
+  }
+  const normalized = region.trim().toLowerCase();
+  const anchor = anchors.find((candidate) => candidate.name.toLowerCase() === normalized) ??
+    anchors.find((candidate) => candidate.name.toLowerCase().includes(normalized));
+  if (!anchor) {
+    return undefined;
+  }
+  return {
+    x: clamp(anchor.bounds.x, 0, width),
+    y: clamp(anchor.bounds.y, 0, height),
+    width: clamp(anchor.bounds.width, 0, width - anchor.bounds.x),
+    height: clamp(anchor.bounds.height, 0, height - anchor.bounds.y)
+  };
+}
+
+function filterNodesByBounds(nodes: LayoutNode[], focusBounds?: Bounds): LayoutNode[] {
+  if (!focusBounds) {
+    return nodes;
+  }
+  return nodes.filter((node) => overlaps(node.bounds, focusBounds));
+}
+
+function filterTextByBounds(blocks: TextBlock[], focusBounds?: Bounds): TextBlock[] {
+  if (!focusBounds) {
+    return blocks;
+  }
+  return blocks.filter((block) => overlaps(block.bounds, focusBounds));
+}
+
+function findAnchorForNode(anchors: SemanticAnchor[], nodeId: string): SemanticAnchor | undefined {
+  return anchors.find((anchor) => anchor.nodeId === nodeId);
+}
+
+function resolveAnchor(anchors: SemanticAnchor[], node: LayoutNode | undefined): SemanticAnchor | undefined {
+  if (!node) {
+    return undefined;
+  }
+  return findAnchorForNode(anchors, node.id) ?? findClosestAnchor(anchors, node.bounds);
+}
+
+function findClosestAnchor(anchors: SemanticAnchor[], bounds: Bounds): SemanticAnchor | undefined {
+  let best: { anchor: SemanticAnchor; score: number } | null = null;
+  for (const anchor of anchors) {
+    const score = overlapScore(anchor.bounds, bounds);
+    if (score > 0.1 && (!best || score > best.score)) {
+      best = { anchor, score };
+    }
+  }
+  return best?.anchor;
+}
+
+function describeAnchor(anchor: SemanticAnchor | undefined, fallback: string): string {
+  return anchor ? anchor.name : fallback;
+}
+
+function buildContextPath(anchor: SemanticAnchor | undefined, anchors: SemanticAnchor[]): string | undefined {
+  if (!anchor) {
+    return undefined;
+  }
+  const parts = [anchor.name];
+  let current = anchor;
+  while (current.parentId) {
+    const parent = anchors.find((candidate) => candidate.id === current.parentId);
+    if (!parent) {
+      break;
+    }
+    parts.unshift(parent.name);
+    current = parent;
+  }
+  return parts.join(" > ");
+}
+
+function buildSpacingContext(measurement: { fromId: string; toId: string }, anchors: SemanticAnchor[]): string | undefined {
+  const from = findAnchorForNode(anchors, measurement.fromId);
+  const to = findAnchorForNode(anchors, measurement.toId);
+  if (!from && !to) {
+    return undefined;
+  }
+  return [from?.name, to?.name].filter(Boolean).join(" <> ");
+}
+
+function describeScope(message: string, focusBounds?: Bounds, regionName?: string): string {
+  if (regionName) {
+    return `${message} inside ${regionName}.`;
+  }
+  if (focusBounds) {
+    return `${message} inside the requested crop.`;
+  }
+  return `${message}.`;
+}
+
+function overlaps(a: Bounds, b: Bounds): boolean {
+  return a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y;
+}
+
+function overlapScore(a: Bounds, b: Bounds): number {
+  const overlapX = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const overlapY = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const overlapArea = overlapX * overlapY;
+  const unionArea = a.width * a.height + b.width * b.height - overlapArea;
+  return unionArea === 0 ? 0 : overlapArea / unionArea;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function sortIssues(issues: CompareIssue[]) {

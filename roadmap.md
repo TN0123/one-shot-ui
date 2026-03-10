@@ -548,19 +548,32 @@ Add heuristics (and optionally LLM assistance) to infer the CSS layout strategy 
 
 Phase 5 should lean into what Phase 4 proved: the product is most valuable once an implementation exists. The goal is not just a tighter loop, but a loop that speaks in implementation terms and can guide an agent with minimal interpretation overhead.
 
+Phase 5 feedback sharpened that direction. Agent testing on a rebuilt dashboard fixture showed that the loop is now usable in the happy path, but it also exposed a clearer priority order:
+
+- the new `plan` command is already useful for fast page-shell understanding
+- semantic anchors improve issue naming and make region selection usable
+- relative fix phrasing is more actionable than absolute coordinates
+- sparse reference extraction is still the main bottleneck underneath the new semantics
+- DOM-aware compare still has not clearly surpassed the pixel/layout loop on real fixtures
+
+In other words, Phase 5 improved the interface to the loop more than the underlying reference understanding. The roadmap should treat that as a reprioritization signal, not just a progress note.
+
 #### Semantic issue naming and page anchors
 
 - replace `region-N` issue references with semantic names tied to page structure
 - issue output should reference UI areas such as "left rail", "task list", "calendar Tuesday column", or "summary composer"
 - add stable semantic anchors so the same part of the page is referred to consistently across iterations
 - include relationship context in issues: parent panel, sibling group, row, column, or component role
+- keep synthetic shell anchors as a fallback for sparse extracts, but treat them as a temporary stabilization layer rather than a substitute for real reference-side panel detection
+- prioritize better image-derived section and panel detection so major page regions are discovered from the screenshot itself
 
 #### DOM-first compare output
 
-- when an implementation DOM is available, make DOM-aware comparison the primary explanation layer
-- match DOM elements to semantic reference nodes and only fall back to raw pixel regions when matching fails
+- when an implementation DOM is available, use DOM-aware comparison as an explanation layer that must earn its default status through benchmarked actionability
+- match DOM elements to semantic reference nodes and only promote DOM-led issues when selector and component matching are strong enough to beat raw region output
 - express issues in CSS/layout terms: size, alignment, gap, distribution, hierarchy, and typography
-- ensure DOM diff clearly beats region diff in actionability before adding more surface area to the compare command
+- strengthen selector prioritization and DOM-to-reference matching before expanding more DOM-specific surface area in the CLI
+- keep the pixel/layout diff as the reliability baseline until DOM-aware output consistently produces more useful issues on benchmark fixtures
 
 #### Relative fix suggestions
 
@@ -570,6 +583,7 @@ Replace absolute pixel coordinates in suggested fixes with relative CSS adjustme
 - "reduce the selected task row height" instead of "set height to 54px"
 - "narrow the highlighted weekday column" instead of "set width to 168px"
 - when DOM-level comparison is available, reference actual selectors, components, and CSS properties
+- preserve relative phrasing even when the issue originates from a pixel/layout diff so the guidance remains implementation-oriented
 
 #### Implementation planning report
 
@@ -577,6 +591,7 @@ Replace absolute pixel coordinates in suggested fixes with relative CSS adjustme
 - produce a panel/component tree, inferred layout strategy, likely CSS primitives, and important repeated patterns
 - summarize which areas are likely grid, flex, layered, scrollable, or text-heavy
 - make the planning report a first-class input to agent code generation rather than a side effect of extraction
+- treat fast page-shell understanding as the primary success criterion for `plan`; the first job is to help an agent scaffold the page correctly, not to emit exhaustive detail
 
 #### Typography and OCR robustness
 
@@ -584,6 +599,7 @@ Replace absolute pixel coordinates in suggested fixes with relative CSS adjustme
 - extract text hierarchy, line-height, alignment, and likely emphasis patterns with confidence scores
 - surface when typography data is weak so agents know when they must rely more on visual judgment
 - prioritize text-heavy screenshots in validation, since typography weakness blocks first-pass planning
+- treat weak typography extraction as a planning blocker, not just a polish gap, because it limits implementation-oriented first-pass guidance
 
 #### Region-of-interest comparison
 
@@ -592,7 +608,8 @@ Allow comparing specific regions rather than full screenshots.
 - `one-shot-ui compare ref.png impl.png --region "left-sidebar"` to focus on a specific panel
 - `one-shot-ui compare ref.png impl.png --crop "0,0,400,1000"` to focus on a pixel region
 - allow region names to come from semantic anchors, not just coordinates
-- reduces noise from unrelated parts of the UI during focused iteration
+- reduce noise from unrelated parts of the UI during focused iteration
+- when semantic node coverage inside the selected region is thin, fall back to pixel-only scoped output instead of pretending the semantic issue list is trustworthy
 
 ### Phase 6: Benchmark Suite and Production Hardening
 
@@ -609,6 +626,8 @@ Build a benchmark set of real-world screenshots and score:
 - DOM diff usefulness (does DOM-aware output produce more directly actionable fixes than region output?)
 - planning usefulness (can an agent form a better first-pass implementation plan from the report?)
 - typography reliability (does text extraction hold up on dense, real-world screenshots?)
+- anchor coverage (how much of the page is covered by real extracted anchors versus synthetic fallback anchors?)
+- ROI compare reliability (when region compare is used, how often do the returned issues stay inside the intended panel and remain actionable?)
 
 Track regressions across releases.
 
@@ -618,6 +637,7 @@ Track regressions across releases.
 - include light and dark themes
 - include dense and sparse layouts
 - include text-heavy and graphic-heavy UIs
+- include the Phase 5 dashboard fixture as a standing benchmark case so anchor coverage, region compare quality, and DOM issue usefulness can be measured explicitly over time
 
 #### Agent integration model
 
@@ -649,7 +669,7 @@ Without a benchmark suite, it will be difficult to know whether the tool is actu
 
 ## Recommended End-To-End Workflow
 
-The most useful workflow, informed by four phases of agent testing:
+The most useful workflow, informed by five phases of agent testing:
 
 1. User provides a target screenshot
 2. Agent runs `one-shot-ui extract --label` to get measurements and semantic labels
@@ -681,17 +701,18 @@ The tool is not a replacement for the agent's visual understanding. It is a prec
 
 ## Suggested Next Design Steps
 
-The monorepo structure, JSON schemas, and CLI commands are implemented through Phase 4. The next useful artifacts to define would be:
+The monorepo structure, JSON schemas, and CLI commands are implemented through Phase 5. The next useful artifacts to define would be:
 
-1. the semantic issue schema: how to represent issue anchors, page areas, component roles, and relationship context
-2. the DOM-diff package API: what Playwright queries to run, what computed style properties to extract, how to match DOM elements to semantic reference nodes, and when to fall back to region output
-3. the planning report schema: panel tree, layout strategy, repeated structures, typography summary, and implementation hints
-4. the typography confidence pipeline: OCR preprocessing, text grouping, hierarchy extraction, and confidence scoring
-5. the benchmark corpus and scoring model: which 20 to 50 screenshots to collect, how to score planning usefulness and DOM diff usefulness, and how to track regressions
+1. the reference anchor coverage benchmark: how to score real extracted panel coverage versus synthetic fallback anchors on representative screenshots
+2. the ROI compare fallback contract: when `--region` should produce semantic issues, when it should degrade to scoped pixel output, and how confidence should be surfaced
+3. the DOM-diff package API: what Playwright queries to run, what computed style properties to extract, how to match DOM elements to semantic reference nodes, and what threshold is required before DOM-led output becomes default
+4. the planning report schema: panel tree, layout strategy, repeated structures, typography summary, and implementation hints tuned for page-shell reconstruction
+5. the typography confidence pipeline: OCR preprocessing, text grouping, hierarchy extraction, and confidence scoring
+6. the benchmark corpus and scoring model: which 20 to 50 screenshots to collect, how to score planning usefulness, ROI compare quality, anchor coverage, and DOM diff usefulness, and how to track regressions
 
-## Lessons Learned From Phases 1 Through 4
+## Lessons Learned From Phases 1 Through 5
 
-These lessons, drawn from four rounds of agent testing, should inform all future development:
+These lessons, drawn from five rounds of agent testing, should inform all future development:
 
 1. **The compare loop is the most valuable feature.** Agents consistently rated capture-compare-heatmap as the most useful workflow. Invest in making it faster, less noisy, and more actionable.
 
@@ -712,3 +733,9 @@ These lessons, drawn from four rounds of agent testing, should inform all future
 9. **Implementation planning is a separate product need from iteration.** Agents can iterate toward a screenshot today, but they still need better first-pass page structure before they can build efficiently.
 
 10. **Typography is part of structure, not just styling.** Weak text extraction does not only hurt polish. It also damages hierarchy detection, spacing judgment, and first-pass implementation planning.
+
+11. **Synthetic anchors are a bridge, not the destination.** They make naming and region selection usable on sparse extracts, but they do not solve the underlying problem of weak screenshot-derived structure.
+
+12. **Region compare needs confidence-aware fallback behavior.** A named region is only helpful if the node coverage inside it is credible. When semantic coverage is thin, scoped pixel output is more honest and often more useful.
+
+13. **The planning step should optimize for shell reconstruction first.** Agents get disproportionate value from quickly understanding the main panels, grid columns, toolbars, and repeated primitives before they start coding.

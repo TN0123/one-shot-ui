@@ -2,7 +2,14 @@
 import { dirname, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { Command } from "commander";
-import { VERSION, extractReportSchema, type LayoutNode } from "@one-shot-ui/core";
+import {
+  VERSION,
+  buildImplementationPlan,
+  buildSemanticAnchors,
+  extractReportSchema,
+  type Bounds,
+  type LayoutNode
+} from "@one-shot-ui/core";
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
 import { captureScreenshot } from "@one-shot-ui/browser-capture";
 import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
@@ -38,6 +45,9 @@ program
     if (report.layoutStrategy) {
       console.log(`Layout strategy: ${report.layoutStrategy.type} (confidence: ${(report.layoutStrategy.confidence * 100).toFixed(0)}%)`);
     }
+    if (report.semanticAnchors?.length) {
+      console.log(`Semantic anchors: ${report.semanticAnchors.slice(0, 4).map((anchor) => anchor.name).join(", ")}`);
+    }
     if (report.semanticLabels?.length) {
       console.log(`Semantic labels: ${report.semanticLabels.length} nodes labeled`);
     }
@@ -51,12 +61,16 @@ program
   .option("--heatmap <path>", "Path to write the diff heatmap")
   .option("--top <n>", "Maximum number of issues to report", "20")
   .option("--no-ocr", "Disable OCR text extraction")
+  .option("--region <anchorName>", "Compare only a named semantic anchor from the reference image")
+  .option("--crop <x,y,width,height>", "Compare only a cropped rectangle")
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       heatmapPath: options.heatmap,
       top: Number.parseInt(options.top, 10),
-      disableOcr: options.ocr === false
+      disableOcr: options.ocr === false,
+      region: options.region,
+      crop: parseCropBounds(options.crop)
     };
 
     const report = await compareImages(referencePath, implementationPath, compareOpts);
@@ -64,21 +78,17 @@ program
     // DOM-level comparison if requested
     if (options.domDiff) {
       try {
+        const referenceReport = await extractImageReport(referencePath, {
+          disableOcr: options.ocr === false
+        });
         const isFile = !options.domDiff.startsWith("http");
         const domTree = await extractDomTree({
           url: isFile ? undefined : options.domDiff,
           filePath: isFile ? resolve(options.domDiff) : undefined
         });
-
-        const referenceImage = await loadImage(resolve(referencePath));
-        const refBg = detectBackgroundColor(referenceImage);
-        const referenceLayout = clusterComponents(
-          enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)
-        ).nodes;
-
-        const domIssues = compareDomToExtract(domTree, referenceLayout);
-        report.issues.push(...domIssues);
-        report.issues = report.issues.slice(0, Number.parseInt(options.top, 10));
+        const scopedLayout = scopeLayout(referenceReport.layout, compareOpts.crop, compareOpts.region, referenceReport.semanticAnchors ?? []);
+        const domIssues = compareDomToExtract(domTree, scopedLayout, referenceReport.semanticAnchors ?? []);
+        report.issues = prioritizeDomIssues(domIssues, report.issues, Number.parseInt(options.top, 10));
       } catch (err) {
         console.error(`DOM diff failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -91,6 +101,13 @@ program
 
     console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
     console.log(`Issues: ${report.issues.length}`);
+    for (const issue of report.issues.slice(0, Math.min(8, report.issues.length))) {
+      const prefix = issue.anchorName ? `${issue.anchorName}: ` : "";
+      console.log(`- [${issue.severity}] ${prefix}${issue.message}`);
+      if (issue.suggestedFix) {
+        console.log(`  fix: ${issue.suggestedFix}`);
+      }
+    }
     if (report.artifacts.heatmapPath) {
       console.log(`Heatmap: ${report.artifacts.heatmapPath}`);
     }
@@ -118,17 +135,56 @@ program
   });
 
 program
+  .command("plan")
+  .argument("<imagePath>", "Path to the reference screenshot")
+  .option("--json", "Print full JSON report", false)
+  .option("--no-ocr", "Disable OCR text extraction")
+  .action(async (imagePath, options) => {
+    const report = await extractImageReport(imagePath, {
+      disableOcr: options.ocr === false
+    });
+
+    if (options.json) {
+      console.log(JSON.stringify({ version: VERSION, implementationPlan: report.implementationPlan }, null, 2));
+      return;
+    }
+
+    const plan = report.implementationPlan;
+    if (!plan) {
+      console.log("No implementation plan was generated.");
+      return;
+    }
+    console.log(`Primary strategy: ${plan.page.primaryStrategy ?? report.layoutStrategy?.type ?? "unknown"}`);
+    for (const note of plan.page.notes) {
+      console.log(`- Note: ${note}`);
+    }
+    for (const primitive of plan.cssPrimitives) {
+      console.log(`- CSS: ${primitive}`);
+    }
+    for (const pattern of plan.repeatedPatterns) {
+      console.log(`- Pattern: ${pattern}`);
+    }
+    if (plan.typography.weak) {
+      console.log(`- Typography warning: ${plan.typography.notes.join(" ")}`);
+    }
+  });
+
+program
   .command("suggest-fixes")
   .argument("<referencePath>", "Path to the reference screenshot")
   .argument("<implementationPath>", "Path to the implementation screenshot")
   .option("--json", "Print full JSON report", false)
   .option("--top <n>", "Maximum number of fixes to report", "20")
   .option("--no-ocr", "Disable OCR text extraction")
+  .option("--region <anchorName>", "Suggest fixes for a named semantic anchor only")
+  .option("--crop <x,y,width,height>", "Suggest fixes for a cropped rectangle only")
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       top: Number.parseInt(options.top, 10),
-      disableOcr: options.ocr === false
+      disableOcr: options.ocr === false,
+      region: options.region,
+      crop: parseCropBounds(options.crop)
     };
 
     const report = await compareImages(referencePath, implementationPath, compareOpts);
@@ -136,21 +192,17 @@ program
     // DOM-level comparison if requested
     if (options.domDiff) {
       try {
+        const referenceReport = await extractImageReport(referencePath, {
+          disableOcr: options.ocr === false
+        });
         const isFile = !options.domDiff.startsWith("http");
         const domTree = await extractDomTree({
           url: isFile ? undefined : options.domDiff,
           filePath: isFile ? resolve(options.domDiff) : undefined
         });
-
-        const referenceImage = await loadImage(resolve(referencePath));
-        const refBg = detectBackgroundColor(referenceImage);
-        const referenceLayout = clusterComponents(
-          enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)
-        ).nodes;
-
-        const domIssues = compareDomToExtract(domTree, referenceLayout);
-        report.issues.push(...domIssues);
-        report.issues = report.issues.slice(0, Number.parseInt(options.top, 10));
+        const scopedLayout = scopeLayout(referenceReport.layout, compareOpts.crop, compareOpts.region, referenceReport.semanticAnchors ?? []);
+        const domIssues = compareDomToExtract(domTree, scopedLayout, referenceReport.semanticAnchors ?? []);
+        report.issues = prioritizeDomIssues(domIssues, report.issues, Number.parseInt(options.top, 10));
       } catch (err) {
         console.error(`DOM diff failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -164,7 +216,8 @@ program
 
     console.log(`${fixes.length} suggested fixes (ordered by priority):\n`);
     for (const fix of fixes) {
-      console.log(`[${fix.priority}] ${fix.category}: ${fix.description}`);
+      const label = fix.anchorName ? `${fix.anchorName} · ` : "";
+      console.log(`[${fix.priority}] ${fix.category}: ${label}${fix.description}`);
       if (fix.css) console.log(`  CSS: ${fix.css}`);
       if (fix.cssSelector) console.log(`  Selector: ${fix.cssSelector}`);
       console.log();
@@ -238,7 +291,17 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
   };
 
   const tokens = generateDesignTokens(baseReport as any);
-  let report: any = { ...baseReport, tokens };
+  const semanticAnchors = buildSemanticAnchors(clustered.nodes, baseReport.text, {
+    width: image.width,
+    height: image.height
+  });
+  const implementationPlan = buildImplementationPlan({
+    layout: clustered.nodes,
+    text: baseReport.text,
+    layoutStrategy,
+    semanticAnchors
+  });
+  let report: any = { ...baseReport, tokens, semanticAnchors, implementationPlan };
 
   // Semantic labeling
   if (options?.enableLabeling) {
@@ -263,16 +326,74 @@ function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: 
   });
 }
 
+function parseCropBounds(raw: string | undefined): Bounds | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const parts = raw.split(",").map((value) => Number.parseInt(value.trim(), 10));
+  if (parts.length !== 4 || parts.some((value) => Number.isNaN(value))) {
+    throw new Error(`Invalid crop value "${raw}". Expected x,y,width,height.`);
+  }
+  return {
+    x: parts[0]!,
+    y: parts[1]!,
+    width: parts[2]!,
+    height: parts[3]!
+  };
+}
+
+function scopeLayout(
+  layout: LayoutNode[],
+  crop: Bounds | undefined,
+  region: string | undefined,
+  anchors: Array<{ name: string; bounds: Bounds }>
+): LayoutNode[] {
+  const focus = crop ?? resolveRegionBounds(region, anchors);
+  if (!focus) {
+    return layout;
+  }
+  return layout.filter((node) => intersects(node.bounds, focus));
+}
+
+function resolveRegionBounds(region: string | undefined, anchors: Array<{ name: string; bounds: Bounds }>): Bounds | undefined {
+  if (!region) {
+    return undefined;
+  }
+  const normalized = region.trim().toLowerCase();
+  const match = anchors.find((anchor) => anchor.name.toLowerCase() === normalized) ??
+    anchors.find((anchor) => anchor.name.toLowerCase().includes(normalized));
+  return match?.bounds;
+}
+
+function intersects(a: Bounds, b: Bounds): boolean {
+  return a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y;
+}
+
+function prioritizeDomIssues<T extends { code: string }>(domIssues: T[], fallbackIssues: T[], top: number): T[] {
+  const deduped = new Map<string, T>();
+  for (const issue of [...domIssues, ...fallbackIssues]) {
+    const key = JSON.stringify([issue.code, (issue as any).anchorName, (issue as any).cssSelector, (issue as any).message]);
+    if (!deduped.has(key)) {
+      deduped.set(key, issue);
+    }
+  }
+  return [...deduped.values()].slice(0, top);
+}
+
 type ImplementationFix = {
   priority: "high" | "medium" | "low";
   category: string;
   nodeId?: string;
+  anchorName?: string;
   description: string;
   css?: string;
   cssSelector?: string;
 };
 
-function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
+function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
   const fixes: ImplementationFix[] = [];
 
   for (const issue of report.issues) {
@@ -280,6 +401,7 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       priority: issue.severity as "high" | "medium" | "low",
       category: issueCategoryMap[issue.code] ?? "general",
       nodeId: issue.nodeId,
+      anchorName: issue.anchorName,
       description: issue.message,
       cssSelector: issue.cssSelector
     };
@@ -294,16 +416,14 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
     // Generate CSS-specific guidance based on issue type
     switch (issue.code) {
       case "POSITION_MISMATCH": {
-        const ref = issue.reference as { x: number; y: number } | undefined;
-        if (ref) {
-          fix.css = `/* Adjust position */ top: ${ref.y}px; left: ${ref.x}px;`;
+        if (issue.suggestedFix) {
+          fix.css = issue.suggestedFix;
         }
         break;
       }
       case "SIZE_MISMATCH": {
-        const ref = issue.reference as { width: number; height: number } | undefined;
-        if (ref) {
-          fix.css = `width: ${ref.width}px; height: ${ref.height}px;`;
+        if (issue.suggestedFix) {
+          fix.css = issue.suggestedFix;
         }
         break;
       }
@@ -366,6 +486,7 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       case "SPACING_MISMATCH": {
         if (issue.suggestedFix) {
           fix.description = issue.suggestedFix;
+          fix.css = issue.suggestedFix;
         }
         break;
       }

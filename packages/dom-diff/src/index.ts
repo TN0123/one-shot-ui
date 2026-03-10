@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium } from "playwright";
-import type { Bounds, CompareIssue, DomElement, LayoutNode } from "@one-shot-ui/core";
+import type { Bounds, CompareIssue, DomElement, LayoutNode, SemanticAnchor } from "@one-shot-ui/core";
 
 const EXTRACTED_STYLE_PROPERTIES = [
   "display",
@@ -140,7 +140,8 @@ export async function extractDomTree(options: ExtractDomOptions): Promise<DomEle
  */
 export function compareDomToExtract(
   domElements: DomElement[],
-  referenceNodes: LayoutNode[]
+  referenceNodes: LayoutNode[],
+  anchors: SemanticAnchor[] = []
 ): CompareIssue[] {
   const flatDom = flattenDomTree(domElements);
   const issues: CompareIssue[] = [];
@@ -153,6 +154,8 @@ export function compareDomToExtract(
     const domBounds = dom.bounds;
     const refBounds = reference.bounds;
     const style = dom.computedStyle;
+    const anchor = anchors.find((candidate) => candidate.nodeId === reference.id);
+    const anchorName = anchor?.name ?? reference.id;
 
     // Position comparison
     const deltaX = domBounds.x - refBounds.x;
@@ -160,20 +163,21 @@ export function compareDomToExtract(
     if (Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6) {
       const marginSuggestions: string[] = [];
       if (Math.abs(deltaY) > 6) {
-        const currentMarginTop = parsePx(style["margin-top"]);
-        marginSuggestions.push(`margin-top: ${currentMarginTop - deltaY}px`);
+        marginSuggestions.push(`${deltaY > 0 ? "move it up" : "move it down"} by ${Math.abs(deltaY)}px`);
       }
       if (Math.abs(deltaX) > 6) {
-        const currentMarginLeft = parsePx(style["margin-left"]);
-        marginSuggestions.push(`margin-left: ${currentMarginLeft - deltaX}px`);
+        marginSuggestions.push(`${deltaX > 0 ? "move it left" : "move it right"} by ${Math.abs(deltaX)}px`);
       }
 
       issues.push({
         code: "DOM_POSITION_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath: anchor?.name,
         cssSelector: dom.selector,
         severity: Math.abs(deltaX) > 16 || Math.abs(deltaY) > 16 ? "high" : "medium",
-        message: `Element "${dom.selector}" is offset from the reference position by ${deltaX}px horizontal, ${deltaY}px vertical.`,
+        message: `${anchorName} (${dom.selector}) is offset from the reference position by ${deltaX}px horizontal and ${deltaY}px vertical.`,
         suggestedFix: marginSuggestions.join("; "),
         cssProperty: "margin",
         reference: { x: refBounds.x, y: refBounds.y },
@@ -192,10 +196,13 @@ export function compareDomToExtract(
       issues.push({
         code: "DOM_SIZE_MISMATCH",
         nodeId: reference.id,
+        anchorId: anchor?.id,
+        anchorName: anchor?.name,
+        contextPath: anchor?.name,
         cssSelector: dom.selector,
         severity: Math.abs(widthDelta) > 16 || Math.abs(heightDelta) > 16 ? "high" : "medium",
-        message: `Element "${dom.selector}" size differs: width ${signedPx(widthDelta)}, height ${signedPx(heightDelta)}.`,
-        suggestedFix: suggestions.join("; "),
+        message: `${anchorName} (${dom.selector}) size differs: width ${signedPx(widthDelta)}, height ${signedPx(heightDelta)}.`,
+        suggestedFix: suggestions.length > 0 ? suggestions.join("; ") : undefined,
         cssProperty: "width/height",
         reference: { width: refBounds.width, height: refBounds.height },
         implementation: { width: domBounds.width, height: domBounds.height }
@@ -210,9 +217,12 @@ export function compareDomToExtract(
         issues.push({
           code: "DOM_STYLE_MISMATCH",
           nodeId: reference.id,
+          anchorId: anchor?.id,
+          anchorName: anchor?.name,
+          contextPath: anchor?.name,
           cssSelector: dom.selector,
           severity: radiusDelta >= 6 ? "medium" : "low",
-          message: `Element "${dom.selector}" border-radius is ${domRadius}px, reference is ${reference.borderRadius}px.`,
+          message: `${anchorName} (${dom.selector}) border-radius is ${domRadius}px, reference is ${reference.borderRadius}px.`,
           suggestedFix: `border-radius: ${reference.borderRadius}px`,
           cssProperty: "border-radius",
           reference: { borderRadius: reference.borderRadius },
@@ -232,9 +242,12 @@ export function compareDomToExtract(
             issues.push({
               code: "DOM_STYLE_MISMATCH",
               nodeId: reference.id,
+              anchorId: anchor?.id,
+              anchorName: anchor?.name,
+              contextPath: anchor?.name,
               cssSelector: dom.selector,
               severity: colorDelta >= 64 ? "medium" : "low",
-              message: `Element "${dom.selector}" background-color is ${domBgColor}, reference fill is ${reference.fill}.`,
+              message: `${anchorName} (${dom.selector}) background-color is ${domBgColor}, reference fill is ${reference.fill}.`,
               suggestedFix: `background-color: ${reference.fill}`,
               cssProperty: "background-color",
               reference: { fill: reference.fill },
