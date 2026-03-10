@@ -1,4 +1,4 @@
-import type { TextBlock } from "@one-shot-ui/core";
+import type { FontFamilyCandidate, TextBlock } from "@one-shot-ui/core";
 import { loadImage, samplePixel } from "@one-shot-ui/image-io";
 
 export async function extractText(imagePath: string): Promise<TextBlock[]> {
@@ -70,6 +70,7 @@ function estimateTypography(
     fontWeight,
     lineHeight,
     letterSpacing,
+    fontFamilyCandidates: rankFontFamilies(fontSize, fontWeight, letterSpacing, foregroundRatio),
     confidence: 0.35 + Math.min(0.4, foregroundRatio)
   };
 }
@@ -117,4 +118,81 @@ function averageCornerRgb(
     g: Math.round(corners.reduce((sum, pixel) => sum + pixel[1], 0) / corners.length),
     b: Math.round(corners.reduce((sum, pixel) => sum + pixel[2], 0) / corners.length)
   };
+}
+
+// Font family heuristic database: common web fonts with their metric characteristics.
+// Each entry maps a font to the typical glyph-width-to-fontSize ratio and weight range
+// where it is most commonly used.
+const FONT_DATABASE: Array<{
+  family: string;
+  category: "sans-serif" | "serif" | "monospace" | "display";
+  widthRatio: number; // average glyph width / fontSize
+  commonWeights: number[];
+  commonSizes: [number, number]; // [min, max] typical range
+}> = [
+  { family: "Inter", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "SF Pro Display", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 600, 700], commonSizes: [16, 72] },
+  { family: "SF Pro Text", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600], commonSizes: [10, 20] },
+  { family: "Helvetica Neue", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 700], commonSizes: [10, 48] },
+  { family: "Arial", category: "sans-serif", widthRatio: 0.53, commonWeights: [400, 700], commonSizes: [10, 48] },
+  { family: "Roboto", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 700], commonSizes: [12, 48] },
+  { family: "Open Sans", category: "sans-serif", widthRatio: 0.53, commonWeights: [400, 600, 700], commonSizes: [12, 36] },
+  { family: "Lato", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 700], commonSizes: [12, 36] },
+  { family: "Poppins", category: "sans-serif", widthRatio: 0.54, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Montserrat", category: "sans-serif", widthRatio: 0.53, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Source Sans Pro", category: "sans-serif", widthRatio: 0.49, commonWeights: [400, 600, 700], commonSizes: [12, 36] },
+  { family: "Nunito Sans", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 600, 700], commonSizes: [12, 36] },
+  { family: "DM Sans", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 700], commonSizes: [12, 48] },
+  { family: "Geist", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Georgia", category: "serif", widthRatio: 0.55, commonWeights: [400, 700], commonSizes: [14, 36] },
+  { family: "Merriweather", category: "serif", widthRatio: 0.56, commonWeights: [400, 700], commonSizes: [14, 36] },
+  { family: "Playfair Display", category: "display", widthRatio: 0.50, commonWeights: [400, 700], commonSizes: [20, 72] },
+  { family: "Fira Code", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
+  { family: "JetBrains Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
+  { family: "SF Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [11, 16] }
+];
+
+function rankFontFamilies(
+  fontSize: number,
+  fontWeight: number,
+  letterSpacing: number,
+  foregroundRatio: number
+): FontFamilyCandidate[] {
+  const observedWidthRatio = 0.52 + letterSpacing * 0.01;
+
+  const scored = FONT_DATABASE.map((font) => {
+    let score = 0;
+
+    // Width ratio match (most differentiating signal from pixels)
+    const widthDelta = Math.abs(font.widthRatio - observedWidthRatio);
+    score += Math.max(0, 1 - widthDelta * 10) * 0.35;
+
+    // Weight match
+    const hasWeight = font.commonWeights.includes(fontWeight);
+    const closestWeight = font.commonWeights.reduce(
+      (best, w) => (Math.abs(w - fontWeight) < Math.abs(best - fontWeight) ? w : best),
+      font.commonWeights[0]!
+    );
+    score += (hasWeight ? 1 : Math.max(0, 1 - Math.abs(closestWeight - fontWeight) / 300)) * 0.2;
+
+    // Size range match
+    const inRange = fontSize >= font.commonSizes[0] && fontSize <= font.commonSizes[1];
+    score += (inRange ? 1 : 0.3) * 0.15;
+
+    // Category prior: sans-serif is the most common in UI
+    if (font.category === "sans-serif") score += 0.15;
+    else if (font.category === "monospace" && foregroundRatio > 0.3) score += 0.1;
+    else if (font.category === "serif") score += 0.05;
+    else score += 0.08;
+
+    // Popularity prior (top fonts get a small boost)
+    const popularFonts = ["Inter", "SF Pro Display", "Roboto", "Helvetica Neue", "Geist"];
+    if (popularFonts.includes(font.family)) score += 0.1;
+
+    return { family: font.family, confidence: Math.round(Math.min(0.95, score) * 100) / 100 };
+  });
+
+  return scored
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 5);
 }

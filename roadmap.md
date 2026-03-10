@@ -17,14 +17,14 @@ The core idea is to build a deterministic UI-analysis and diff engine that produ
 
 ## Product Principle
 
-Large language models should not do first-pass measurement from raw pixels.
+Use each tool for what it is best at. LLMs and deterministic pipelines have complementary strengths, and the system should combine them rather than relying on either alone.
 
-LLMs are useful for:
+LLMs are strong at:
 
-- planning implementation
-- choosing semantic components
-- interpreting ambiguous cases
-- generating code changes from structured data
+- identifying what is in a screenshot: panels, sidebars, buttons, inputs, text blocks
+- inferring layout strategy: CSS grid columns, flex direction, nesting hierarchy
+- planning implementation: choosing components, naming tokens, structuring code
+- interpreting ambiguous cases and generating code changes from structured data
 
 LLMs are weak at:
 
@@ -33,7 +33,19 @@ LLMs are weak at:
 - reliable radius and shadow estimation
 - pixel-level visual comparison
 
-Because of that, `one-shot-ui` should extract hard measurements first and let the agent reason on top of those measurements.
+Deterministic analysis is strong at:
+
+- measuring exact pixel distances, colors, radii, and shadows within known regions
+- comparing two images and quantifying their differences
+- generating repeatable, stable, versioned outputs
+
+Deterministic analysis is weak at:
+
+- recovering semantic structure from raw pixels (distinguishing a button from a card from a sidebar)
+- inferring layout strategy (CSS grid vs flexbox vs absolute positioning)
+- understanding what a UI element is, as opposed to where it is
+
+Because of this, `one-shot-ui` should let the LLM identify structure first, then use deterministic analysis to measure precisely within that structure. The compare loop should combine pixel-level diffing with DOM-level structural comparison.
 
 ## Core Capabilities
 
@@ -46,13 +58,15 @@ The CLI should revolve around three core engines:
 These capabilities should enable an iterative workflow:
 
 1. User provides the target screenshot
-2. Agent runs `extract`
-3. Agent implements the UI
-4. Agent captures a screenshot of its implementation
-5. Agent runs `compare`
-6. CLI returns exact visual mismatches
-7. Agent patches code
+2. Agent runs `extract` to get structured measurements and color data
+3. Agent uses its own visual understanding of the screenshot plus the extract data to plan the implementation
+4. Agent implements the UI in code
+5. Agent runs `capture` to screenshot its implementation
+6. Agent runs `compare` to get structured issues and a heatmap
+7. Agent patches code based on the highest-priority issues
 8. Loop continues until the implementation reaches a target quality threshold
+
+The key insight from agent testing is that step 3 is where the agent's visual reasoning matters most. The tool should provide precise measurements to support that reasoning, not try to replace it.
 
 ## Recommended Tech Direction
 
@@ -91,6 +105,10 @@ The repository should be organized into focused packages:
   - screenshot comparison, perceptual scoring, issue generation
 - `packages/agent-api`
   - stable JSON outputs, prompt helpers, tool contracts
+- `packages/dom-diff`
+  - Playwright-based DOM extraction from implementation, structural comparison against extract output
+- `packages/semantic-label`
+  - optional LLM-assisted labeling of extracted regions with semantic names and component types
 - `packages/browser-capture`
   - Playwright-based capture of local implementations
 - `packages/cli`
@@ -107,12 +125,13 @@ The codebase should stay modular by following these rules:
 - Pass data through typed intermediate representations
 - Isolate image processing from semantic inference
 - Isolate deterministic logic from model-based logic
-- Treat LLM integrations as optional adapters, not core infrastructure
+- LLM integrations should be optional but first-class: clearly separated behind adapter interfaces, never required for the core pipeline to run, but treated as valuable when available
 
 A useful rule of thumb:
 
-- geometry, layout, spacing, color, and diff logic should be deterministic
-- semantics, naming, ambiguity resolution, and implementation guidance can use model assistance
+- geometry, spacing, color, radius, shadow, and diff logic should be deterministic
+- structural identification (what is this element?), layout strategy inference (grid vs flex), semantic naming, and implementation planning should use model assistance when available
+- the tool should degrade gracefully: without an LLM, it still provides measurements and pixel diffs; with an LLM, it also provides semantic structure and implementation plans
 
 ## Agent-First CLI Design
 
@@ -416,27 +435,31 @@ This is far more useful for automation than a generic prose description.
 
 ## Where Models Should Help
 
-Models can be useful for:
+Agent testing across three phases revealed that the boundary between "what models should do" and "what deterministic analysis should do" was drawn too conservatively. The original assumption was that deterministic pixel analysis could recover semantic UI structure. In practice, flood-fill region detection cannot distinguish a button from a card from a sidebar. The model boundary should be redrawn.
 
-- naming inferred components
-- ranking font families
-- generating implementation guidance
-- suggesting framework-appropriate component structures
-- producing fix instructions from diff data
+Models should be the primary source of truth for:
+
+- identifying what is in the screenshot: panels, sidebars, headers, buttons, inputs, icons, text blocks
+- inferring layout strategy: "this is a 4-column CSS grid with columns 64px 322px 1fr 446px"
+- naming components semantically: "region-8" should become "calendar-day-header-tuesday"
+- planning the implementation approach: which CSS patterns, which component structure
+- generating fix instructions from structured diff data
 
 Models should not be the primary source of truth for:
 
-- spacing
-- colors
-- box geometry
-- border radii
-- pixel differences
+- exact spacing measurements (use deterministic pixel measurement)
+- precise color values (use region-based pixel sampling)
+- border radii and shadow parameters (use pixel-level estimation)
+- visual similarity scoring (use pixelmatch and perceptual hashing)
+- pixel-level comparison (use bitmap diffing)
+
+The ideal pipeline is: model identifies structure, deterministic tools measure within that structure, model generates code from the measurements.
 
 ## MVP Roadmap
 
 Build the project in phases.
 
-### Phase 1
+### Phase 1 (complete)
 
 - CLI scaffold
 - image loading and preprocessing
@@ -447,7 +470,7 @@ Build the project in phases.
 - pixel diff and heatmap generation
 - JSON output contracts
 
-### Phase 2
+### Phase 2 (complete)
 
 - spacing measurement
 - border radius extraction
@@ -455,67 +478,200 @@ Build the project in phases.
 - component clustering
 - actionable diff reports
 
-### Phase 3
+### Phase 3 (complete)
 
 - shadow and gradient detection
 - font family ranking
 - design token generation
-- richer implementation guidance tuned for agents
+- `tokens` and `suggest-fixes` CLI commands
+- CSS-specific fix guidance in compare output
 
-### Phase 4
+### Phase 4: Semantic Understanding and Compare Quality
 
-- benchmark suite over real screenshots
-- automated iterative fix loop
-- multi-screenshot support for responsive variants and interactive states
+Phase 4 is a pivot point. Phases 1 through 3 built the deterministic measurement foundation. Phase 4 bridges the gap between raw pixel analysis and semantic UI understanding.
+
+#### Compare engine noise reduction
+
+The compare engine currently generates too many false positives. In agent testing, a typical compare produced 69 EXTRA_NODE issues alongside 13 real problems. The signal-to-noise ratio must improve.
+
+- filter out EXTRA_NODE issues where the extra region is small and fully contained within a matched node (sub-element artifact)
+- merge nearby small regions into their parent containers before comparison
+- suppress issues below a configurable confidence threshold
+- cap the issue list at a configurable maximum (default 20), sorted by severity and visual impact
+- add a `--top N` flag to compare and suggest-fixes to control output volume
+
+#### DOM-level comparison
+
+Since implementations are HTML/CSS and the tool already uses Playwright, the compare engine should extract the actual DOM structure of the implementation and compare it against the reference extraction.
+
+- use Playwright to query the implementation's computed styles, bounding boxes, and DOM tree
+- compare DOM element positions and sizes against the reference extract's layout nodes
+- generate issues in terms of CSS properties: "this element's margin-top is 16px but should be 24px" rather than "this pixel region is offset by 8px"
+- output suggested fixes as CSS property changes, not absolute coordinates
+
+#### Default-on OCR
+
+Typography data is too important to be opt-in. OCR should be enabled by default.
+
+- enable OCR by default and add `--no-ocr` flag to disable it
+- improve OCR performance with image preprocessing: contrast enhancement, scaling to optimal DPI
+- ensure font family ranking, font size tokens, and font weight tokens are populated in default runs
+
+#### Semantic node labeling (optional LLM step)
+
+Add an optional `--label` flag to the extract command that uses an LLM to label detected regions with semantic names and component types.
+
+- send the screenshot and the detected layout nodes to an LLM
+- receive back labels like "left-sidebar", "calendar-header", "task-list-item-3"
+- attach labels to the extract output so that compare issues reference meaningful names
+- keep this step optional: without an LLM key, the tool falls back to region-N identifiers
+- define a typed `SemanticLabel` schema: `{ nodeId, label, componentType, confidence }`
+
+#### Layout strategy detection
+
+Add heuristics (and optionally LLM assistance) to infer the CSS layout strategy used in the reference.
+
+- detect grid patterns: evenly spaced columns or rows, repeated column widths
+- detect flex patterns: single-axis arrangement with consistent gaps
+- detect sidebar patterns: narrow fixed-width column adjacent to a fluid column
+- output a `layoutStrategy` field in the extract report: `{ type: "grid" | "flex" | "absolute", columns?, rows?, gaps? }`
+
+### Phase 5: Tighter Iteration Loop
+
+Phase 5 focuses on making the capture-compare-fix loop as tight and automated as possible.
+
+#### Automated iterative fix loop
+
+- add a `one-shot-ui loop` command that runs capture, compare, and outputs fixes in a single step
+- support a `--threshold` flag: keep iterating (with agent intervention) until mismatch ratio drops below the target
+- support a `--max-iterations` flag to prevent infinite loops
+- output a summary of convergence across iterations: mismatch ratio at each step, issues fixed, issues remaining
+
+#### Relative fix suggestions
+
+Replace absolute pixel coordinates in suggested fixes with relative CSS adjustments.
+
+- "increase gap between these siblings by 8px" instead of "move to (224, 480)"
+- "set this element's width to match its sibling" instead of "set width to 168px"
+- when DOM-level comparison is available, reference actual CSS properties and selectors
+
+#### Region-of-interest comparison
+
+Allow comparing specific regions rather than full screenshots.
+
+- `one-shot-ui compare ref.png impl.png --region "left-sidebar"` to focus on a specific panel
+- `one-shot-ui compare ref.png impl.png --crop "0,0,400,1000"` to focus on a pixel region
+- reduces noise from unrelated parts of the UI during focused iteration
+
+#### Multi-screenshot support
+
+- compare multiple screenshots in a single run for responsive variants
+- support interactive state screenshots: hover, focus, active, disabled
+- aggregate issues across variants into a single report
+
+### Phase 6: Benchmark Suite and Production Hardening
+
+#### Benchmark suite
+
+Build a benchmark set of real-world screenshots and score:
+
+- pixel similarity (mismatch ratio)
+- structural accuracy (how many semantic elements were correctly identified)
+- measurement precision (spacing error, color delta, radius error, font size error)
+- compare quality (signal-to-noise ratio of issues, false positive rate)
+- convergence speed (how many iterations to reach target quality)
+
+Track regressions across releases.
+
+#### Real-world screenshot corpus
+
+- collect 20 to 50 diverse screenshots: dashboards, landing pages, forms, settings panels, mobile UIs
+- include light and dark themes
+- include dense and sparse layouts
+- include text-heavy and graphic-heavy UIs
+
+#### Agent integration model
+
+Define how `one-shot-ui` integrates with agent tools like Claude Code, Cursor, and Codex.
+
+- MCP tool definitions for extract, compare, capture, and suggest-fixes
+- prompt templates that structure the extract output for optimal agent consumption
+- example agent workflows with step-by-step tool calls
 
 ## Benchmarking Strategy
 
-Success should be measured, not assumed.
+Success should be measured, not assumed. The benchmark suite (Phase 6) should score along two axes:
 
-Build a benchmark set of screenshots and score:
+### Extraction quality
 
-- pixel similarity
-- spacing error distribution
-- color delta
-- font size error
-- radius error
-- component match accuracy
+- structural accuracy: how many real UI elements were detected and correctly bounded
+- measurement precision: spacing error distribution, color delta, radius error, font size error
+- semantic labeling accuracy (when LLM labeling is enabled): are labels correct?
+- false positive rate: how many detected regions are noise?
+
+### Compare and iteration quality
+
+- signal-to-noise ratio of compare issues: real problems vs false positives
+- convergence speed: how many capture-compare-fix iterations to reach a target mismatch ratio
+- fix actionability: can an agent directly apply the suggested fix and see improvement?
 
 Without a benchmark suite, it will be difficult to know whether the tool is actually improving agent output.
 
 ## Recommended End-To-End Workflow
 
-The most useful user and agent workflow likely looks like this:
+The most useful workflow, informed by three phases of agent testing:
 
 1. User provides a target screenshot
-2. Agent runs `one-shot-ui extract`
-3. Agent implements the UI in code
-4. Agent captures a screenshot of the implementation
-5. Agent runs `one-shot-ui compare`
-6. CLI returns structured issues and suggested fixes
-7. Agent updates the implementation
-8. Agent repeats until the implementation reaches a target match score
+2. Agent runs `one-shot-ui extract --label` to get measurements and semantic labels
+3. Agent runs `one-shot-ui tokens` to get the design token palette
+4. Agent uses its own visual understanding of the screenshot, combined with the extract data and tokens, to plan the implementation (layout strategy, component structure, CSS approach)
+5. Agent implements the UI in code
+6. Agent runs `one-shot-ui capture` to screenshot its implementation
+7. Agent runs `one-shot-ui compare` to get a focused list of high-priority issues with CSS fix suggestions
+8. Agent applies fixes, prioritizing high-severity issues
+9. Agent repeats steps 6 through 8 until the mismatch ratio drops below the target threshold
+
+The critical insight is that step 4 is where the agent's visual reasoning adds the most value. The tool should support that reasoning with precise data, not try to replace it. The compare loop (steps 6 through 9) is the tool's strongest feature and should be as tight and low-noise as possible.
 
 ## Product Framing
 
 The strongest product framing is:
 
-> `one-shot-ui` is a deterministic vision and diff toolkit for AI agents building pixel-perfect frontends from screenshots.
+> `one-shot-ui` is a measurement and comparison toolkit that helps AI agents build pixel-perfect frontends from screenshots through tight, structured feedback loops.
 
 This framing emphasizes the real moat:
 
-- reliable structured extraction
-- deterministic measurements
-- repeatable diffing
-- feedback loops for iterative refinement
+- precise deterministic measurements that complement the agent's visual reasoning
+- a fast capture-compare-fix loop with actionable, low-noise issue reports
+- structured outputs that give agents exact values instead of vague descriptions
+- optional LLM-assisted semantic labeling that bridges pixels and meaning
 
-It is stronger than positioning the project as just another screenshot-to-code tool.
+The tool is not a replacement for the agent's visual understanding. It is a precision instrument that makes the agent's visual understanding actionable.
 
 ## Suggested Next Design Steps
 
-After this roadmap, the next useful artifacts to define would be:
+The monorepo structure, JSON schemas, and CLI commands are implemented through Phase 3. The next useful artifacts to define would be:
 
-1. the monorepo folder structure and package APIs
-2. the JSON schemas for `extract` and `compare`
-3. the MVP execution plan for the first two weeks
-4. the agent integration model for tools like Cursor and Claude Code
+1. the DOM-diff package API: what Playwright queries to run, what computed style properties to extract, how to match DOM elements to extract report nodes
+2. the semantic labeling adapter interface: how to send screenshot and layout data to an LLM, what schema the labels should follow, how to handle the no-LLM fallback
+3. the compare noise reduction strategy: specific heuristics for filtering EXTRA_NODE false positives, merging sub-element regions, and capping issue output
+4. the benchmark corpus: which 20 to 50 screenshots to collect, how to score extraction and comparison quality, how to track regressions
+5. the agent integration model: MCP tool definitions, prompt templates, and example workflows for Claude Code, Cursor, and Codex
+
+## Lessons Learned From Phases 1 Through 3
+
+These lessons, drawn from three rounds of agent testing, should inform all future development:
+
+1. **The compare loop is the most valuable feature.** Agents consistently rated capture-compare-heatmap as the most useful workflow. Invest in making it faster, less noisy, and more actionable.
+
+2. **Extract data supplements the agent's visual reasoning; it does not replace it.** Agents built UIs primarily from looking at the screenshot, not from the extract report. The extract data was most useful for precise color values and spacing measurements, not for understanding what the UI contains.
+
+3. **Fewer, better issues beat comprehensive but noisy issue lists.** A compare report with 10 high-confidence, actionable issues is more useful than one with 100 issues where 70 are false positives. Prioritize precision over recall in issue generation.
+
+4. **Absolute pixel coordinates are not actionable for CSS.** Agents work with flexbox, grid, padding, and margin. Fixes should be expressed in relative CSS terms, not absolute pixel positions.
+
+5. **Semantic labels transform usability.** "Region-8" is meaningless. "Calendar day header for Tuesday" is immediately actionable. Even approximate semantic labeling dramatically improves the agent experience.
+
+6. **OCR should be on by default.** Typography data is too important to be opt-in. Every agent that tested the tool noted the absence of text data as a significant limitation.
+
+7. **Deterministic pixel analysis cannot recover semantic structure.** Flood-fill region detection, edge detection, and connected components cannot distinguish a button from a card from a sidebar. This is a hard ceiling of the current approach, not a tuning problem. Semantic understanding requires either LLM assistance or a fundamentally different CV approach.

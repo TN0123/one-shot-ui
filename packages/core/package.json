@@ -1,6 +1,9 @@
 {
   "name": "@one-shot-ui/core",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens": "./src/tokens.ts"
+  }
 }
-

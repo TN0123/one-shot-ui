@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 export const boundsSchema = z.object({
   x: z.number().nonnegative(),
@@ -15,6 +15,40 @@ export const imageMetaSchema = z.object({
   height: z.number().int().positive(),
   channels: z.number().int().positive(),
   trimmedBounds: boundsSchema.nullable()
+});
+
+export const shadowSpecSchema = z.object({
+  xOffset: z.number(),
+  yOffset: z.number(),
+  blurRadius: z.number().nonnegative(),
+  spread: z.number(),
+  color: z.string().regex(/^rgba?\(/i),
+  confidence: z.number().min(0).max(1)
+});
+
+export const gradientStopSchema = z.object({
+  color: z.string().regex(/^#[0-9A-F]{6}$/i),
+  position: z.number().min(0).max(1)
+});
+
+export const gradientSpecSchema = z.object({
+  type: z.enum(["linear", "radial"]),
+  angle: z.number().nullable(),
+  stops: z.array(gradientStopSchema).min(2),
+  confidence: z.number().min(0).max(1)
+});
+
+export const fontFamilyCandidateSchema = z.object({
+  family: z.string(),
+  confidence: z.number().min(0).max(1)
+});
+
+export const designTokenSchema = z.object({
+  name: z.string(),
+  type: z.enum(["color", "spacing", "radius", "fontSize", "fontWeight", "shadow"]),
+  value: z.unknown(),
+  usedBy: z.array(z.string()),
+  count: z.number().int().positive()
 });
 
 export const colorSwatchSchema = z.object({
@@ -38,6 +72,7 @@ export const textBlockSchema = z.object({
     fontWeight: z.number().int().min(100).max(900).nullable(),
     lineHeight: z.number().positive().nullable(),
     letterSpacing: z.number().nullable(),
+    fontFamilyCandidates: z.array(fontFamilyCandidateSchema).optional(),
     confidence: z.number().min(0).max(1)
   }).nullable()
 });
@@ -47,7 +82,9 @@ export const layoutNodeSchema = z.object({
   kind: z.enum(["region", "text"]),
   bounds: boundsSchema,
   fill: z.string().regex(/^#[0-9A-F]{6}$/i).nullable(),
+  gradient: gradientSpecSchema.nullable().optional(),
   borderRadius: z.number().nonnegative().nullable(),
+  shadow: shadowSpecSchema.nullable().optional(),
   componentId: z.string().nullable(),
   confidence: z.number().min(0).max(1)
 });
@@ -81,6 +118,7 @@ export const extractReportSchema = z.object({
   text: z.array(textBlockSchema),
   spacing: z.array(spacingMeasurementSchema),
   components: z.array(componentClusterSchema),
+  tokens: z.array(designTokenSchema).optional(),
   diagnostics: z.object({
     background: z.string().regex(/^#[0-9A-F]{6}$/i),
     activePixelRatio: z.number().min(0).max(1)
@@ -97,7 +135,10 @@ export const compareIssueSchema = z.object({
     "BORDER_RADIUS_MISMATCH",
     "FONT_SIZE_MISMATCH",
     "FONT_WEIGHT_MISMATCH",
+    "FONT_FAMILY_MISMATCH",
     "COLOR_MISMATCH",
+    "SHADOW_MISMATCH",
+    "GRADIENT_MISMATCH",
     "MISSING_NODE",
     "EXTRA_NODE",
     "LAYOUT_COUNT_MISMATCH",
@@ -148,6 +189,11 @@ export const captureResultSchema = z.object({
 
 export type Bounds = z.infer<typeof boundsSchema>;
 export type ImageMeta = z.infer<typeof imageMetaSchema>;
+export type ShadowSpec = z.infer<typeof shadowSpecSchema>;
+export type GradientStop = z.infer<typeof gradientStopSchema>;
+export type GradientSpec = z.infer<typeof gradientSpecSchema>;
+export type FontFamilyCandidate = z.infer<typeof fontFamilyCandidateSchema>;
+export type DesignToken = z.infer<typeof designTokenSchema>;
 export type ColorSwatch = z.infer<typeof colorSwatchSchema>;
 export type TextBlock = z.infer<typeof textBlockSchema>;
 export type LayoutNode = z.infer<typeof layoutNodeSchema>;

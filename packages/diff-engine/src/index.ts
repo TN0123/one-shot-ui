@@ -3,10 +3,10 @@ import { dirname, resolve } from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import { VERSION, compareReportSchema, type CompareIssue, type LayoutNode, type TextBlock } from "@one-shot-ui/core";
-import { loadImage } from "@one-shot-ui/image-io";
+import { detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
-import { estimateBorderRadius, estimateNodeFill } from "@one-shot-ui/vision-style";
+import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
 
 export async function compareImages(
@@ -21,8 +21,10 @@ export async function compareImages(
     extractText(implementationPath)
   ]);
 
-  const referenceLayout = clusterComponents(enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage))).nodes;
-  const implementationLayout = clusterComponents(enrichLayoutNodes(implementationImage, detectLayoutBoxes(implementationImage))).nodes;
+  const refBg = detectBackgroundColor(referenceImage);
+  const implBg = detectBackgroundColor(implementationImage);
+  const referenceLayout = clusterComponents(enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)).nodes;
+  const implementationLayout = clusterComponents(enrichLayoutNodes(implementationImage, detectLayoutBoxes(implementationImage), implBg)).nodes;
   const referenceSpacing = measureSpacing(referenceLayout);
   const implementationSpacing = measureSpacing(implementationLayout);
 
@@ -164,13 +166,15 @@ export async function compareImages(
   });
 }
 
-function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: LayoutNode[]): LayoutNode[] {
+function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: LayoutNode[], backgroundHex: string): LayoutNode[] {
   return nodes.map((node) => {
     const fill = estimateNodeFill(image, node.bounds) ?? node.fill;
     return {
       ...node,
       fill,
+      gradient: detectGradient(image, node.bounds),
       borderRadius: estimateBorderRadius(image, node.bounds, fill),
+      shadow: detectShadow(image, node.bounds, fill, backgroundHex),
       componentId: null
     };
   });
@@ -262,6 +266,95 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode):
     }
   }
 
+  // Shadow comparison
+  if (reference.shadow && !implementation.shadow) {
+    issues.push({
+      code: "SHADOW_MISMATCH",
+      nodeId: reference.id,
+      severity: "medium",
+      message: `Node ${reference.id} is missing a shadow present in the reference.`,
+      suggestedFix: `Add box-shadow: ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
+      reference: { shadow: reference.shadow },
+      implementation: { shadow: null }
+    });
+  } else if (!reference.shadow && implementation.shadow) {
+    issues.push({
+      code: "SHADOW_MISMATCH",
+      nodeId: reference.id,
+      severity: "low",
+      message: `Node ${reference.id} has an extra shadow not present in the reference.`,
+      suggestedFix: "Remove the box-shadow from this element.",
+      reference: { shadow: null },
+      implementation: { shadow: implementation.shadow }
+    });
+  } else if (reference.shadow && implementation.shadow) {
+    const blurDelta = Math.abs(reference.shadow.blurRadius - implementation.shadow.blurRadius);
+    const offsetDelta =
+      Math.abs(reference.shadow.xOffset - implementation.shadow.xOffset) +
+      Math.abs(reference.shadow.yOffset - implementation.shadow.yOffset);
+    if (blurDelta >= 3 || offsetDelta >= 3) {
+      issues.push({
+        code: "SHADOW_MISMATCH",
+        nodeId: reference.id,
+        severity: blurDelta >= 6 || offsetDelta >= 6 ? "medium" : "low",
+        message: `Node ${reference.id} shadow differs from the reference.`,
+        suggestedFix: `Set box-shadow to ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
+        reference: { shadow: reference.shadow },
+        implementation: { shadow: implementation.shadow }
+      });
+    }
+  }
+
+  // Gradient comparison
+  if (reference.gradient && !implementation.gradient) {
+    const stops = reference.gradient.stops.map((s) => `${s.color} ${Math.round(s.position * 100)}%`).join(", ");
+    const direction = reference.gradient.type === "linear" ? `${reference.gradient.angle}deg, ` : "";
+    issues.push({
+      code: "GRADIENT_MISMATCH",
+      nodeId: reference.id,
+      severity: "medium",
+      message: `Node ${reference.id} is missing a gradient present in the reference.`,
+      suggestedFix: `Add background: ${reference.gradient.type}-gradient(${direction}${stops}).`,
+      reference: { gradient: reference.gradient },
+      implementation: { gradient: null }
+    });
+  } else if (!reference.gradient && implementation.gradient) {
+    issues.push({
+      code: "GRADIENT_MISMATCH",
+      nodeId: reference.id,
+      severity: "low",
+      message: `Node ${reference.id} has a gradient not present in the reference.`,
+      suggestedFix: "Replace the gradient with a solid fill.",
+      reference: { gradient: null },
+      implementation: { gradient: implementation.gradient }
+    });
+  } else if (reference.gradient && implementation.gradient) {
+    const refStops = reference.gradient.stops;
+    const implStops = implementation.gradient.stops;
+    let colorDelta = 0;
+    const minStops = Math.min(refStops.length, implStops.length);
+    for (let i = 0; i < minStops; i++) {
+      colorDelta += hexDistance(refStops[i]!.color, implStops[i]!.color);
+    }
+    if (
+      reference.gradient.type !== implementation.gradient.type ||
+      refStops.length !== implStops.length ||
+      colorDelta > 48
+    ) {
+      const stops = refStops.map((s) => `${s.color} ${Math.round(s.position * 100)}%`).join(", ");
+      const direction = reference.gradient.type === "linear" ? `${reference.gradient.angle}deg, ` : "";
+      issues.push({
+        code: "GRADIENT_MISMATCH",
+        nodeId: reference.id,
+        severity: colorDelta > 96 ? "medium" : "low",
+        message: `Node ${reference.id} gradient differs from the reference.`,
+        suggestedFix: `Set background to ${reference.gradient.type}-gradient(${direction}${stops}).`,
+        reference: { gradient: reference.gradient },
+        implementation: { gradient: implementation.gradient }
+      });
+    }
+  }
+
   return issues;
 }
 
@@ -342,6 +435,31 @@ function compareText(referenceText: TextBlock[], implementationText: TextBlock[]
           reference: { fontWeight: match.reference.typography.fontWeight, text: match.reference.text },
           implementation: { fontWeight: match.implementation.typography.fontWeight, text: match.implementation.text }
         });
+      }
+    }
+
+    // Font family comparison
+    const refCandidates = match.reference.typography?.fontFamilyCandidates;
+    const implCandidates = match.implementation.typography?.fontFamilyCandidates;
+    if (refCandidates?.length && implCandidates?.length) {
+      const refTop = refCandidates[0]!.family;
+      const implTop = implCandidates[0]!.family;
+      if (refTop !== implTop) {
+        const refTopFamilies = refCandidates.slice(0, 3).map((c) => c.family);
+        const implTopFamily = implTop;
+        const isCloseMatch = refTopFamilies.includes(implTopFamily);
+        if (!isCloseMatch) {
+          const candidates = refCandidates.slice(0, 3).map((c) => `${c.family} (${Math.round(c.confidence * 100)}%)`).join(", ");
+          issues.push({
+            code: "FONT_FAMILY_MISMATCH",
+            nodeId: match.reference.id,
+            severity: "low",
+            message: `Text block ${match.reference.id} likely uses a different font family.`,
+            suggestedFix: `Consider using font-family: "${refTop}", sans-serif. Top candidates: ${candidates}.`,
+            reference: { fontFamilyCandidates: refCandidates.slice(0, 3), text: match.reference.text },
+            implementation: { fontFamilyCandidates: implCandidates.slice(0, 3), text: match.implementation.text }
+          });
+        }
       }
     }
   }
