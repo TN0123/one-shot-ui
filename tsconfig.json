@@ -17,6 +17,7 @@
       "@one-shot-ui/vision-layout": ["packages/vision-layout/src/index.ts"],
       "@one-shot-ui/vision-style": ["packages/vision-style/src/index.ts"],
       "@one-shot-ui/vision-text": ["packages/vision-text/src/index.ts"],
+      "@one-shot-ui/vision-components": ["packages/vision-components/src/index.ts"],
       "@one-shot-ui/diff-engine": ["packages/diff-engine/src/index.ts"],
       "@one-shot-ui/browser-capture": ["packages/browser-capture/src/index.ts"]
     }

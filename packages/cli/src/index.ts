@@ -2,12 +2,13 @@
 import { dirname, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { Command } from "commander";
-import { VERSION, extractReportSchema } from "@one-shot-ui/core";
+import { VERSION, extractReportSchema, type LayoutNode } from "@one-shot-ui/core";
 import { captureScreenshot } from "@one-shot-ui/browser-capture";
 import { compareImages } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
-import { detectLayoutBoxes } from "@one-shot-ui/vision-layout";
-import { extractDominantColors } from "@one-shot-ui/vision-style";
+import { clusterComponents } from "@one-shot-ui/vision-components";
+import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
+import { estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
 
 const program = new Command();
@@ -83,6 +84,8 @@ program.parseAsync(process.argv);
 async function extractImageReport(imagePath: string) {
   const normalizedPath = resolve(imagePath);
   const image = await loadImage(normalizedPath);
+  const layout = enrichLayoutNodes(image, detectLayoutBoxes(image));
+  const clustered = clusterComponents(layout);
   const report = {
     version: VERSION,
     image: {
@@ -93,8 +96,10 @@ async function extractImageReport(imagePath: string) {
       trimmedBounds: image.trimmedBounds
     },
     colors: extractDominantColors(image),
-    layout: detectLayoutBoxes(image),
+    layout: clustered.nodes,
     text: await extractText(normalizedPath),
+    spacing: measureSpacing(clustered.nodes),
+    components: clustered.components,
     diagnostics: {
       background: detectBackgroundColor(image),
       activePixelRatio: calculateActivePixelRatio(image)
@@ -104,3 +109,14 @@ async function extractImageReport(imagePath: string) {
   return extractReportSchema.parse(report);
 }
 
+function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: LayoutNode[]): LayoutNode[] {
+  return nodes.map((node) => {
+    const fill = estimateNodeFill(image, node.bounds) ?? node.fill;
+    return {
+      ...node,
+      fill,
+      borderRadius: estimateBorderRadius(image, node.bounds, fill),
+      componentId: null
+    };
+  });
+}

@@ -1,4 +1,4 @@
-import type { LayoutNode } from "@one-shot-ui/core";
+import type { LayoutNode, SpacingMeasurement } from "@one-shot-ui/core";
 import { detectBackgroundColor, rgbToHex, samplePixel, type ImageAsset } from "@one-shot-ui/image-io";
 
 const GRID_SIZE = 8;
@@ -50,6 +50,8 @@ export function detectLayoutBoxes(image: ImageAsset): LayoutNode[] {
           height: Math.min(image.height - minRow * GRID_SIZE, (maxRow - minRow + 1) * GRID_SIZE)
         },
         fill: rgbToHex(r, g, b),
+        borderRadius: null,
+        componentId: null,
         confidence: Math.min(0.95, 0.45 + component.length / (rows * cols))
       });
     }
@@ -61,6 +63,42 @@ export function detectLayoutBoxes(image: ImageAsset): LayoutNode[] {
     }
     return a.bounds.y - b.bounds.y;
   });
+}
+
+export function measureSpacing(nodes: LayoutNode[]): SpacingMeasurement[] {
+  const measurements: SpacingMeasurement[] = [];
+  const seen = new Set<string>();
+  let index = 0;
+
+  for (const node of nodes) {
+    const nearestHorizontal = findNearestSpacing(node, nodes, "horizontal");
+    if (nearestHorizontal) {
+      const key = `h:${nearestHorizontal.fromId}:${nearestHorizontal.toId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        measurements.push({
+          id: `space-${++index}`,
+          ...nearestHorizontal
+        });
+      }
+    }
+
+    const nearestVertical = findNearestSpacing(node, nodes, "vertical");
+    if (nearestVertical) {
+      const key = `v:${nearestVertical.fromId}:${nearestVertical.toId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        measurements.push({
+          id: `space-${++index}`,
+          ...nearestVertical
+        });
+      }
+    }
+  }
+
+  return measurements
+    .filter((measurement) => measurement.distance >= 0)
+    .sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id));
 }
 
 function isActiveCell(
@@ -127,3 +165,92 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   };
 }
 
+function findNearestSpacing(
+  source: LayoutNode,
+  nodes: LayoutNode[],
+  axis: "horizontal" | "vertical"
+): Omit<SpacingMeasurement, "id"> | null {
+  let best: Omit<SpacingMeasurement, "id"> | null = null;
+
+  for (const candidate of nodes) {
+    if (candidate.id === source.id) {
+      continue;
+    }
+
+    if (axis === "horizontal") {
+      const distance = directionalHorizontalDistance(source, candidate);
+      if (distance === null) {
+        continue;
+      }
+      const measurement = {
+        fromId: source.id,
+        toId: candidate.id,
+        axis,
+        distance,
+        alignment: resolveAlignment(source.bounds.y, source.bounds.height, candidate.bounds.y, candidate.bounds.height)
+      } as const;
+      if (!best || measurement.distance < best.distance) {
+        best = measurement;
+      }
+      continue;
+    }
+
+    const distance = directionalVerticalDistance(source, candidate);
+    if (distance === null) {
+      continue;
+    }
+    const measurement = {
+      fromId: source.id,
+      toId: candidate.id,
+      axis,
+      distance,
+      alignment: resolveAlignment(source.bounds.x, source.bounds.width, candidate.bounds.x, candidate.bounds.width)
+    } as const;
+    if (!best || measurement.distance < best.distance) {
+      best = measurement;
+    }
+  }
+
+  return best;
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
+  return Math.min(endA, endB) - Math.max(startA, startB) > 0;
+}
+
+function directionalHorizontalDistance(source: LayoutNode, candidate: LayoutNode): number | null {
+  if (!rangesOverlap(source.bounds.y, source.bounds.y + source.bounds.height, candidate.bounds.y, candidate.bounds.y + candidate.bounds.height)) {
+    return null;
+  }
+  if (candidate.bounds.x < source.bounds.x) {
+    return null;
+  }
+  return Math.max(0, candidate.bounds.x - (source.bounds.x + source.bounds.width));
+}
+
+function directionalVerticalDistance(source: LayoutNode, candidate: LayoutNode): number | null {
+  if (!rangesOverlap(source.bounds.x, source.bounds.x + source.bounds.width, candidate.bounds.x, candidate.bounds.x + candidate.bounds.width)) {
+    return null;
+  }
+  if (candidate.bounds.y < source.bounds.y) {
+    return null;
+  }
+  return Math.max(0, candidate.bounds.y - (source.bounds.y + source.bounds.height));
+}
+
+function resolveAlignment(startA: number, sizeA: number, startB: number, sizeB: number): "start" | "center" | "end" | "overlap" {
+  const endA = startA + sizeA;
+  const endB = startB + sizeB;
+  const centerA = startA + sizeA / 2;
+  const centerB = startB + sizeB / 2;
+  if (Math.abs(startA - startB) <= 4) {
+    return "start";
+  }
+  if (Math.abs(endA - endB) <= 4) {
+    return "end";
+  }
+  if (Math.abs(centerA - centerB) <= 4) {
+    return "center";
+  }
+  return "overlap";
+}

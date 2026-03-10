@@ -10,17 +10,21 @@ Instead, `one-shot-ui` aims to extract deterministic, machine-readable UI data f
 
 ## Status
 
-The repo is currently at Phase 1 of the roadmap.
+The repo is currently in Phase 2 of the roadmap.
 
-Phase 1 includes:
+Phase 2 now includes:
 
 - CLI scaffold
 - image loading and preprocessing
 - dominant color extraction
 - coarse layout box detection
-- OCR integration path with offline-safe fallback
+- spacing measurement between neighboring regions
+- border radius estimation for detected regions
+- OCR-driven font size and weight heuristics when OCR is enabled
+- simple component clustering for repeated visual patterns
 - Playwright screenshot capture
 - pixel diff and heatmap generation
+- actionable compare issues for position, size, spacing, color, radius, and text heuristics
 - typed JSON contracts
 
 Roadmap details are in roadmap.md.
@@ -88,17 +92,19 @@ packages/
   core/             shared schemas and contracts
   diff-engine/      image compare and heatmap generation
   image-io/         image loading and preprocessing helpers
+  vision-components/ repeated-pattern clustering
   vision-layout/    coarse layout box detection
   vision-style/     dominant color extraction
   vision-text/      OCR adapter
 testing/            static testing fixture and outputs
 ```
 
-## Notes on Phase 1
+## Notes on the current phase
 
 - OCR is currently opt-in via `ONE_SHOT_UI_ENABLE_OCR=1`.
-- Layout detection is intentionally coarse in this phase.
-- `compare` is useful today for broad mismatch detection, but not yet for exact implementation guidance.
+- Layout detection is still intentionally coarse and region-oriented rather than a full semantic tree.
+- Border radius, spacing, typography, and component outputs are deterministic heuristics, not model-backed vision.
+- `compare` now produces actionable machine-readable issues, but richer shadow, gradient, and font-family analysis remain Phase 3 work.
 
 See phase1.md for the build plan and phase1-agent-feedback.md for implementation feedback from using the Phase 1 CLI in practice.
 
