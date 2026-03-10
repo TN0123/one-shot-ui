@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@one-shot-ui/core": ["packages/core/src/index.ts"],
+      "@one-shot-ui/image-io": ["packages/image-io/src/index.ts"],
+      "@one-shot-ui/vision-layout": ["packages/vision-layout/src/index.ts"],
+      "@one-shot-ui/vision-style": ["packages/vision-style/src/index.ts"],
+      "@one-shot-ui/vision-text": ["packages/vision-text/src/index.ts"],
+      "@one-shot-ui/diff-engine": ["packages/diff-engine/src/index.ts"],
+      "@one-shot-ui/browser-capture": ["packages/browser-capture/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*.ts", "packages/**/*.d.ts"]
+}

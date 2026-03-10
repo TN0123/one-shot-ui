@@ -1,0 +1,29 @@
+{
+  "name": "one-shot-ui",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.2",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "install:browsers": "playwright install chromium",
+    "typecheck": "tsc --noEmit",
+    "extract": "bun packages/cli/src/index.ts extract",
+    "compare": "bun packages/cli/src/index.ts compare",
+    "capture": "bun packages/cli/src/index.ts capture"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "pixelmatch": "^7.1.0",
+    "playwright": "^1.54.2",
+    "pngjs": "^7.0.0",
+    "sharp": "^0.34.3",
+    "tesseract.js": "^6.0.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}
