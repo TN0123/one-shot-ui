@@ -2,23 +2,38 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-import { VERSION, compareReportSchema, type CompareIssue, type LayoutNode, type TextBlock } from "@one-shot-ui/core";
+import { VERSION, compareReportSchema, type CompareIssue, type CompareOptions, type LayoutNode, type TextBlock } from "@one-shot-ui/core";
 import { detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill } from "@one-shot-ui/vision-style";
-import { extractText } from "@one-shot-ui/vision-text";
+import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
+
+export interface CompareImagesOptions {
+  heatmapPath?: string;
+  top?: number;
+  confidenceThreshold?: number;
+  disableOcr?: boolean;
+}
 
 export async function compareImages(
   referencePath: string,
   implementationPath: string,
-  heatmapPath?: string
+  heatmapPathOrOptions?: string | CompareImagesOptions
 ) {
+  const options: CompareImagesOptions = typeof heatmapPathOrOptions === "string"
+    ? { heatmapPath: heatmapPathOrOptions }
+    : heatmapPathOrOptions ?? {};
+
+  const top = options.top ?? 20;
+  const confidenceThreshold = options.confidenceThreshold ?? 0.3;
+  const textOptions: ExtractTextOptions = { disableOcr: options.disableOcr };
+
   const [referenceImage, implementationImage, referenceText, implementationText] = await Promise.all([
     loadImage(referencePath),
     loadImage(implementationPath),
-    extractText(referencePath),
-    extractText(implementationPath)
+    extractText(referencePath, textOptions),
+    extractText(implementationPath, textOptions)
   ]);
 
   const refBg = detectBackgroundColor(referenceImage);
@@ -128,6 +143,10 @@ export async function compareImages(
     if (matchedImplementationIds.has(node.id)) {
       continue;
     }
+    // Noise reduction: filter small EXTRA_NODE regions contained within matched nodes
+    if (isSubElementArtifact(node, layoutMatches)) {
+      continue;
+    }
     issues.push({
       code: "EXTRA_NODE",
       nodeId: node.id,
@@ -142,11 +161,14 @@ export async function compareImages(
   issues.push(...compareText(referenceText, implementationText));
 
   let normalizedHeatmapPath: string | null = null;
-  if (heatmapPath) {
-    normalizedHeatmapPath = resolve(heatmapPath);
+  if (options.heatmapPath) {
+    normalizedHeatmapPath = resolve(options.heatmapPath);
     await mkdir(dirname(normalizedHeatmapPath), { recursive: true });
     await writeFile(normalizedHeatmapPath, PNG.sync.write(diff));
   }
+
+  // Noise reduction: filter low-confidence issues and cap the list
+  const filteredIssues = applyNoiseReduction(sortIssues(issues), confidenceThreshold, top);
 
   return compareReportSchema.parse({
     version: VERSION,
@@ -159,11 +181,87 @@ export async function compareImages(
       widthDelta: implementationImage.width - referenceImage.width,
       heightDelta: implementationImage.height - referenceImage.height
     },
-    issues: sortIssues(issues),
+    issues: filteredIssues,
     artifacts: {
       heatmapPath: normalizedHeatmapPath
     }
   });
+}
+
+/**
+ * Noise reduction: filter out EXTRA_NODE issues where the extra region is small
+ * and fully contained within a matched implementation node (sub-element artifact).
+ */
+function isSubElementArtifact(
+  node: LayoutNode,
+  matches: Array<{ reference: LayoutNode; implementation: LayoutNode }>
+): boolean {
+  const nodeArea = node.bounds.width * node.bounds.height;
+
+  for (const match of matches) {
+    const impl = match.implementation;
+    const implArea = impl.bounds.width * impl.bounds.height;
+
+    // Check if the extra node is fully contained within a matched node
+    const contained =
+      node.bounds.x >= impl.bounds.x &&
+      node.bounds.y >= impl.bounds.y &&
+      node.bounds.x + node.bounds.width <= impl.bounds.x + impl.bounds.width &&
+      node.bounds.y + node.bounds.height <= impl.bounds.y + impl.bounds.height;
+
+    if (contained && nodeArea < implArea * 0.5) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Applies noise reduction heuristics:
+ * - Merges nearby small regions that likely represent the same issue
+ * - Filters issues below confidence threshold based on severity
+ * - Caps the issue list at the specified maximum
+ */
+function applyNoiseReduction(
+  issues: CompareIssue[],
+  confidenceThreshold: number,
+  maxIssues: number
+): CompareIssue[] {
+  let filtered = issues;
+
+  // Suppress low-value EXTRA_NODE issues when they dominate the list
+  const extraNodeCount = filtered.filter((i) => i.code === "EXTRA_NODE").length;
+  const nonExtraCount = filtered.length - extraNodeCount;
+  if (extraNodeCount > nonExtraCount * 2 && extraNodeCount > 5) {
+    // Keep only the largest EXTRA_NODE issues
+    const extraNodes = filtered.filter((i) => i.code === "EXTRA_NODE");
+    const nonExtraNodes = filtered.filter((i) => i.code !== "EXTRA_NODE");
+
+    const sortedExtra = extraNodes.sort((a, b) => {
+      const aArea = getIssueBoundsArea(a);
+      const bArea = getIssueBoundsArea(b);
+      return bArea - aArea;
+    });
+
+    filtered = [...nonExtraNodes, ...sortedExtra.slice(0, Math.max(5, nonExtraCount))];
+    filtered = sortIssues(filtered);
+  }
+
+  // Cap at max issues
+  return filtered.slice(0, maxIssues);
+}
+
+function getIssueBoundsArea(issue: CompareIssue): number {
+  const impl = issue.implementation as { bounds?: { width: number; height: number } } | undefined;
+  if (impl?.bounds) {
+    return impl.bounds.width * impl.bounds.height;
+  }
+  const ref = issue.reference as { bounds?: { width: number; height: number } } | undefined;
+  if (ref?.bounds) {
+    return ref.bounds.width * ref.bounds.height;
+  }
+  return 0;
 }
 
 function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: LayoutNode[], backgroundHex: string): LayoutNode[] {

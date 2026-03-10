@@ -5,12 +5,14 @@ import { Command } from "commander";
 import { VERSION, extractReportSchema, type LayoutNode } from "@one-shot-ui/core";
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
 import { captureScreenshot } from "@one-shot-ui/browser-capture";
-import { compareImages } from "@one-shot-ui/diff-engine";
+import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
-import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
+import { detectLayoutBoxes, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
+import { labelNodes } from "@one-shot-ui/semantic-label";
+import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
 
 const program = new Command();
 program.name("one-shot-ui").description("Deterministic UI extraction and diff toolkit").version(VERSION);
@@ -19,8 +21,13 @@ program
   .command("extract")
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
+  .option("--no-ocr", "Disable OCR text extraction")
+  .option("--label", "Enable semantic node labeling (heuristic; provide adapter for LLM)", false)
   .action(async (imagePath, options) => {
-    const report = await extractImageReport(imagePath);
+    const report = await extractImageReport(imagePath, {
+      disableOcr: options.ocr === false,
+      enableLabeling: options.label
+    });
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
       return;
@@ -28,6 +35,12 @@ program
 
     console.log(`Extracted ${report.layout.length} layout regions and ${report.text.length} text blocks from ${report.image.path}`);
     console.log(`Top colors: ${report.colors.slice(0, 4).map((color) => color.hex).join(", ")}`);
+    if (report.layoutStrategy) {
+      console.log(`Layout strategy: ${report.layoutStrategy.type} (confidence: ${(report.layoutStrategy.confidence * 100).toFixed(0)}%)`);
+    }
+    if (report.semanticLabels?.length) {
+      console.log(`Semantic labels: ${report.semanticLabels.length} nodes labeled`);
+    }
   });
 
 program
@@ -36,8 +49,41 @@ program
   .argument("<implementationPath>", "Path to the implementation screenshot")
   .option("--json", "Print full JSON report", false)
   .option("--heatmap <path>", "Path to write the diff heatmap")
+  .option("--top <n>", "Maximum number of issues to report", "20")
+  .option("--no-ocr", "Disable OCR text extraction")
+  .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
   .action(async (referencePath, implementationPath, options) => {
-    const report = await compareImages(referencePath, implementationPath, options.heatmap);
+    const compareOpts: CompareImagesOptions = {
+      heatmapPath: options.heatmap,
+      top: Number.parseInt(options.top, 10),
+      disableOcr: options.ocr === false
+    };
+
+    const report = await compareImages(referencePath, implementationPath, compareOpts);
+
+    // DOM-level comparison if requested
+    if (options.domDiff) {
+      try {
+        const isFile = !options.domDiff.startsWith("http");
+        const domTree = await extractDomTree({
+          url: isFile ? undefined : options.domDiff,
+          filePath: isFile ? resolve(options.domDiff) : undefined
+        });
+
+        const referenceImage = await loadImage(resolve(referencePath));
+        const refBg = detectBackgroundColor(referenceImage);
+        const referenceLayout = clusterComponents(
+          enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)
+        ).nodes;
+
+        const domIssues = compareDomToExtract(domTree, referenceLayout);
+        report.issues.push(...domIssues);
+        report.issues = report.issues.slice(0, Number.parseInt(options.top, 10));
+      } catch (err) {
+        console.error(`DOM diff failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
       return;
@@ -54,8 +100,11 @@ program
   .command("tokens")
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
+  .option("--no-ocr", "Disable OCR text extraction")
   .action(async (imagePath, options) => {
-    const report = await extractImageReport(imagePath);
+    const report = await extractImageReport(imagePath, {
+      disableOcr: options.ocr === false
+    });
     const tokens = generateDesignTokens(report);
     if (options.json) {
       console.log(JSON.stringify({ version: VERSION, tokens }, null, 2));
@@ -73,8 +122,40 @@ program
   .argument("<referencePath>", "Path to the reference screenshot")
   .argument("<implementationPath>", "Path to the implementation screenshot")
   .option("--json", "Print full JSON report", false)
+  .option("--top <n>", "Maximum number of fixes to report", "20")
+  .option("--no-ocr", "Disable OCR text extraction")
+  .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
   .action(async (referencePath, implementationPath, options) => {
-    const report = await compareImages(referencePath, implementationPath);
+    const compareOpts: CompareImagesOptions = {
+      top: Number.parseInt(options.top, 10),
+      disableOcr: options.ocr === false
+    };
+
+    const report = await compareImages(referencePath, implementationPath, compareOpts);
+
+    // DOM-level comparison if requested
+    if (options.domDiff) {
+      try {
+        const isFile = !options.domDiff.startsWith("http");
+        const domTree = await extractDomTree({
+          url: isFile ? undefined : options.domDiff,
+          filePath: isFile ? resolve(options.domDiff) : undefined
+        });
+
+        const referenceImage = await loadImage(resolve(referencePath));
+        const refBg = detectBackgroundColor(referenceImage);
+        const referenceLayout = clusterComponents(
+          enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)
+        ).nodes;
+
+        const domIssues = compareDomToExtract(domTree, referenceLayout);
+        report.issues.push(...domIssues);
+        report.issues = report.issues.slice(0, Number.parseInt(options.top, 10));
+      } catch (err) {
+        console.error(`DOM diff failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     const fixes = generateImplementationGuidance(report);
     if (options.json) {
       console.log(JSON.stringify({ version: VERSION, fixes }, null, 2));
@@ -85,6 +166,7 @@ program
     for (const fix of fixes) {
       console.log(`[${fix.priority}] ${fix.category}: ${fix.description}`);
       if (fix.css) console.log(`  CSS: ${fix.css}`);
+      if (fix.cssSelector) console.log(`  Selector: ${fix.cssSelector}`);
       console.log();
     }
   });
@@ -121,12 +203,19 @@ program
 
 program.parseAsync(process.argv);
 
-async function extractImageReport(imagePath: string) {
+interface ExtractOptions {
+  disableOcr?: boolean;
+  enableLabeling?: boolean;
+}
+
+async function extractImageReport(imagePath: string, options?: ExtractOptions) {
   const normalizedPath = resolve(imagePath);
   const image = await loadImage(normalizedPath);
   const backgroundHex = detectBackgroundColor(image);
   const layout = enrichLayoutNodes(image, detectLayoutBoxes(image), backgroundHex);
   const clustered = clusterComponents(layout);
+  const layoutStrategy = detectLayoutStrategy(clustered.nodes);
+
   const baseReport = {
     version: VERSION,
     image: {
@@ -138,9 +227,10 @@ async function extractImageReport(imagePath: string) {
     },
     colors: extractDominantColors(image),
     layout: clustered.nodes,
-    text: await extractText(normalizedPath),
+    text: await extractText(normalizedPath, { disableOcr: options?.disableOcr }),
     spacing: measureSpacing(clustered.nodes),
     components: clustered.components,
+    layoutStrategy,
     diagnostics: {
       background: backgroundHex,
       activePixelRatio: calculateActivePixelRatio(image)
@@ -148,7 +238,13 @@ async function extractImageReport(imagePath: string) {
   };
 
   const tokens = generateDesignTokens(baseReport as any);
-  const report = { ...baseReport, tokens };
+  let report: any = { ...baseReport, tokens };
+
+  // Semantic labeling
+  if (options?.enableLabeling) {
+    const labels = await labelNodes(normalizedPath, clustered.nodes);
+    report = { ...report, semanticLabels: labels };
+  }
 
   return extractReportSchema.parse(report);
 }
@@ -173,9 +269,10 @@ type ImplementationFix = {
   nodeId?: string;
   description: string;
   css?: string;
+  cssSelector?: string;
 };
 
-function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; severity: string; message: string; suggestedFix?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
+function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
   const fixes: ImplementationFix[] = [];
 
   for (const issue of report.issues) {
@@ -183,8 +280,16 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       priority: issue.severity as "high" | "medium" | "low",
       category: issueCategoryMap[issue.code] ?? "general",
       nodeId: issue.nodeId,
-      description: issue.message
+      description: issue.message,
+      cssSelector: issue.cssSelector
     };
+
+    // DOM-level issues already have CSS-specific suggestions
+    if (issue.code.startsWith("DOM_") && issue.suggestedFix) {
+      fix.css = issue.suggestedFix;
+      fixes.push(fix);
+      continue;
+    }
 
     // Generate CSS-specific guidance based on issue type
     switch (issue.code) {
@@ -288,5 +393,8 @@ const issueCategoryMap: Record<string, string> = {
   MISSING_NODE: "structure",
   EXTRA_NODE: "structure",
   LAYOUT_COUNT_MISMATCH: "structure",
-  TEXT_COUNT_MISMATCH: "structure"
+  TEXT_COUNT_MISMATCH: "structure",
+  DOM_POSITION_MISMATCH: "dom-layout",
+  DOM_SIZE_MISMATCH: "dom-layout",
+  DOM_STYLE_MISMATCH: "dom-style"
 };

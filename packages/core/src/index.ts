@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export const boundsSchema = z.object({
   x: z.number().nonnegative(),
@@ -110,6 +110,35 @@ export const componentClusterSchema = z.object({
   confidence: z.number().min(0).max(1)
 });
 
+// Phase 4: Semantic node labeling
+export const semanticLabelSchema = z.object({
+  nodeId: z.string(),
+  label: z.string(),
+  componentType: z.string(),
+  confidence: z.number().min(0).max(1)
+});
+
+// Phase 4: Layout strategy detection
+export const layoutStrategySchema = z.object({
+  type: z.enum(["grid", "flex", "absolute", "unknown"]),
+  columns: z.array(z.number()).optional(),
+  rows: z.array(z.number()).optional(),
+  gaps: z.object({
+    horizontal: z.number().nonnegative().nullable(),
+    vertical: z.number().nonnegative().nullable()
+  }).optional(),
+  confidence: z.number().min(0).max(1)
+});
+
+// Phase 4: DOM element for DOM-level comparison
+export const domElementSchema = z.object({
+  selector: z.string(),
+  tagName: z.string(),
+  bounds: boundsSchema,
+  computedStyle: z.record(z.string(), z.string()),
+  children: z.array(z.lazy((): z.ZodType => domElementSchema)).optional()
+});
+
 export const extractReportSchema = z.object({
   version: z.string(),
   image: imageMetaSchema,
@@ -119,6 +148,8 @@ export const extractReportSchema = z.object({
   spacing: z.array(spacingMeasurementSchema),
   components: z.array(componentClusterSchema),
   tokens: z.array(designTokenSchema).optional(),
+  semanticLabels: z.array(semanticLabelSchema).optional(),
+  layoutStrategy: layoutStrategySchema.optional(),
   diagnostics: z.object({
     background: z.string().regex(/^#[0-9A-F]{6}$/i),
     activePixelRatio: z.number().min(0).max(1)
@@ -142,14 +173,27 @@ export const compareIssueSchema = z.object({
     "MISSING_NODE",
     "EXTRA_NODE",
     "LAYOUT_COUNT_MISMATCH",
-    "TEXT_COUNT_MISMATCH"
+    "TEXT_COUNT_MISMATCH",
+    "DOM_POSITION_MISMATCH",
+    "DOM_SIZE_MISMATCH",
+    "DOM_STYLE_MISMATCH"
   ]),
   nodeId: z.string().optional(),
   severity: z.enum(["low", "medium", "high"]),
   message: z.string(),
   suggestedFix: z.string().optional(),
+  cssProperty: z.string().optional(),
+  cssSelector: z.string().optional(),
   reference: z.unknown().optional(),
   implementation: z.unknown().optional()
+});
+
+export const compareOptionsSchema = z.object({
+  heatmapPath: z.string().optional(),
+  top: z.number().int().positive().default(20),
+  confidenceThreshold: z.number().min(0).max(1).default(0.3),
+  enableDomDiff: z.boolean().default(false),
+  implementationUrl: z.string().optional()
 });
 
 export const compareReportSchema = z.object({
@@ -199,8 +243,12 @@ export type TextBlock = z.infer<typeof textBlockSchema>;
 export type LayoutNode = z.infer<typeof layoutNodeSchema>;
 export type SpacingMeasurement = z.infer<typeof spacingMeasurementSchema>;
 export type ComponentCluster = z.infer<typeof componentClusterSchema>;
+export type SemanticLabel = z.infer<typeof semanticLabelSchema>;
+export type LayoutStrategy = z.infer<typeof layoutStrategySchema>;
+export type DomElement = z.infer<typeof domElementSchema>;
 export type ExtractReport = z.infer<typeof extractReportSchema>;
 export type CompareIssue = z.infer<typeof compareIssueSchema>;
+export type CompareOptions = z.infer<typeof compareOptionsSchema>;
 export type CompareReport = z.infer<typeof compareReportSchema>;
 export type CaptureOptions = z.infer<typeof captureOptionsSchema>;
 export type CaptureResult = z.infer<typeof captureResultSchema>;

@@ -1,8 +1,13 @@
 import type { FontFamilyCandidate, TextBlock } from "@one-shot-ui/core";
 import { loadImage, samplePixel } from "@one-shot-ui/image-io";
 
-export async function extractText(imagePath: string): Promise<TextBlock[]> {
-  if (process.env.ONE_SHOT_UI_ENABLE_OCR !== "1") {
+export interface ExtractTextOptions {
+  disableOcr?: boolean;
+}
+
+export async function extractText(imagePath: string, options?: ExtractTextOptions): Promise<TextBlock[]> {
+  const disableOcr = options?.disableOcr ?? process.env.ONE_SHOT_UI_DISABLE_OCR === "1";
+  if (disableOcr) {
     return [];
   }
 

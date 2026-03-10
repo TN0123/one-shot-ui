@@ -486,9 +486,17 @@ Build the project in phases.
 - `tokens` and `suggest-fixes` CLI commands
 - CSS-specific fix guidance in compare output
 
-### Phase 4: Semantic Understanding and Compare Quality
+### Phase 4 (complete)
 
-Phase 4 is a pivot point. Phases 1 through 3 built the deterministic measurement foundation. Phase 4 bridges the gap between raw pixel analysis and semantic UI understanding.
+Phase 4 is a pivot point. Phases 1 through 3 built the deterministic measurement foundation. Phase 4 validated that the capture-compare-heatmap loop is the strongest part of the product, but it also showed that semantic understanding and implementation-aware guidance are still the main gaps.
+
+The clearest takeaways from the Phase 4 build are:
+
+- the compare loop is already useful in real agent workflows
+- DOM-aware output does not yet beat the visual compare loop in practice
+- issue phrasing is still too tied to anonymous regions instead of page structure
+- fix suggestions still need to move from coordinates to CSS/layout language
+- first-pass screenshot understanding is still not strong enough to drive implementation planning
 
 #### Compare engine noise reduction
 
@@ -536,24 +544,46 @@ Add heuristics (and optionally LLM assistance) to infer the CSS layout strategy 
 - detect sidebar patterns: narrow fixed-width column adjacent to a fluid column
 - output a `layoutStrategy` field in the extract report: `{ type: "grid" | "flex" | "absolute", columns?, rows?, gaps? }`
 
-### Phase 5: Tighter Iteration Loop
+### Phase 5: Semantic Iteration Loop
 
-Phase 5 focuses on making the capture-compare-fix loop as tight and automated as possible.
+Phase 5 should lean into what Phase 4 proved: the product is most valuable once an implementation exists. The goal is not just a tighter loop, but a loop that speaks in implementation terms and can guide an agent with minimal interpretation overhead.
 
-#### Automated iterative fix loop
+#### Semantic issue naming and page anchors
 
-- add a `one-shot-ui loop` command that runs capture, compare, and outputs fixes in a single step
-- support a `--threshold` flag: keep iterating (with agent intervention) until mismatch ratio drops below the target
-- support a `--max-iterations` flag to prevent infinite loops
-- output a summary of convergence across iterations: mismatch ratio at each step, issues fixed, issues remaining
+- replace `region-N` issue references with semantic names tied to page structure
+- issue output should reference UI areas such as "left rail", "task list", "calendar Tuesday column", or "summary composer"
+- add stable semantic anchors so the same part of the page is referred to consistently across iterations
+- include relationship context in issues: parent panel, sibling group, row, column, or component role
+
+#### DOM-first compare output
+
+- when an implementation DOM is available, make DOM-aware comparison the primary explanation layer
+- match DOM elements to semantic reference nodes and only fall back to raw pixel regions when matching fails
+- express issues in CSS/layout terms: size, alignment, gap, distribution, hierarchy, and typography
+- ensure DOM diff clearly beats region diff in actionability before adding more surface area to the compare command
 
 #### Relative fix suggestions
 
 Replace absolute pixel coordinates in suggested fixes with relative CSS adjustments.
 
 - "increase gap between these siblings by 8px" instead of "move to (224, 480)"
-- "set this element's width to match its sibling" instead of "set width to 168px"
-- when DOM-level comparison is available, reference actual CSS properties and selectors
+- "reduce the selected task row height" instead of "set height to 54px"
+- "narrow the highlighted weekday column" instead of "set width to 168px"
+- when DOM-level comparison is available, reference actual selectors, components, and CSS properties
+
+#### Implementation planning report
+
+- add a planning step before code generation that outputs an implementation-oriented page structure
+- produce a panel/component tree, inferred layout strategy, likely CSS primitives, and important repeated patterns
+- summarize which areas are likely grid, flex, layered, scrollable, or text-heavy
+- make the planning report a first-class input to agent code generation rather than a side effect of extraction
+
+#### Typography and OCR robustness
+
+- improve OCR preprocessing and text grouping so typography survives real screenshots
+- extract text hierarchy, line-height, alignment, and likely emphasis patterns with confidence scores
+- surface when typography data is weak so agents know when they must rely more on visual judgment
+- prioritize text-heavy screenshots in validation, since typography weakness blocks first-pass planning
 
 #### Region-of-interest comparison
 
@@ -561,13 +591,8 @@ Allow comparing specific regions rather than full screenshots.
 
 - `one-shot-ui compare ref.png impl.png --region "left-sidebar"` to focus on a specific panel
 - `one-shot-ui compare ref.png impl.png --crop "0,0,400,1000"` to focus on a pixel region
+- allow region names to come from semantic anchors, not just coordinates
 - reduces noise from unrelated parts of the UI during focused iteration
-
-#### Multi-screenshot support
-
-- compare multiple screenshots in a single run for responsive variants
-- support interactive state screenshots: hover, focus, active, disabled
-- aggregate issues across variants into a single report
 
 ### Phase 6: Benchmark Suite and Production Hardening
 
@@ -580,6 +605,10 @@ Build a benchmark set of real-world screenshots and score:
 - measurement precision (spacing error, color delta, radius error, font size error)
 - compare quality (signal-to-noise ratio of issues, false positive rate)
 - convergence speed (how many iterations to reach target quality)
+- semantic issue quality (does the issue phrasing match how an implementer thinks about the page?)
+- DOM diff usefulness (does DOM-aware output produce more directly actionable fixes than region output?)
+- planning usefulness (can an agent form a better first-pass implementation plan from the report?)
+- typography reliability (does text extraction hold up on dense, real-world screenshots?)
 
 Track regressions across releases.
 
@@ -596,6 +625,7 @@ Define how `one-shot-ui` integrates with agent tools like Claude Code, Cursor, a
 
 - MCP tool definitions for extract, compare, capture, and suggest-fixes
 - prompt templates that structure the extract output for optimal agent consumption
+- prompt templates for the planning report and semantic issue schema
 - example agent workflows with step-by-step tool calls
 
 ## Benchmarking Strategy
@@ -619,48 +649,49 @@ Without a benchmark suite, it will be difficult to know whether the tool is actu
 
 ## Recommended End-To-End Workflow
 
-The most useful workflow, informed by three phases of agent testing:
+The most useful workflow, informed by four phases of agent testing:
 
 1. User provides a target screenshot
 2. Agent runs `one-shot-ui extract --label` to get measurements and semantic labels
-3. Agent runs `one-shot-ui tokens` to get the design token palette
-4. Agent uses its own visual understanding of the screenshot, combined with the extract data and tokens, to plan the implementation (layout strategy, component structure, CSS approach)
-5. Agent implements the UI in code
-6. Agent runs `one-shot-ui capture` to screenshot its implementation
-7. Agent runs `one-shot-ui compare` to get a focused list of high-priority issues with CSS fix suggestions
-8. Agent applies fixes, prioritizing high-severity issues
-9. Agent repeats steps 6 through 8 until the mismatch ratio drops below the target threshold
+3. Agent runs the planning step to get an implementation-oriented page structure
+4. Agent runs `one-shot-ui tokens` to get the design token palette
+5. Agent uses its own visual understanding of the screenshot, combined with the planning output and tokens, to plan the implementation
+6. Agent implements the UI in code
+7. Agent runs `one-shot-ui capture` to screenshot its implementation
+8. Agent runs `one-shot-ui compare` to get a focused list of high-priority semantic issues with relative CSS/layout fix suggestions
+9. Agent applies fixes, prioritizing high-severity issues
+10. Agent repeats steps 7 through 9 until the mismatch ratio drops below the target threshold
 
-The critical insight is that step 4 is where the agent's visual reasoning adds the most value. The tool should support that reasoning with precise data, not try to replace it. The compare loop (steps 6 through 9) is the tool's strongest feature and should be as tight and low-noise as possible.
+The critical insight is that the planning step should support the agent's visual reasoning before code exists, while the compare loop should dominate once code exists. The tool should support both stages, but the compare loop is already the strongest feature and should remain the center of gravity.
 
 ## Product Framing
 
 The strongest product framing is:
 
-> `one-shot-ui` is a measurement and comparison toolkit that helps AI agents build pixel-perfect frontends from screenshots through tight, structured feedback loops.
+> `one-shot-ui` is an implementation-aware comparison and planning toolkit that helps AI agents build pixel-perfect frontends from screenshots through tight, structured feedback loops.
 
 This framing emphasizes the real moat:
 
 - precise deterministic measurements that complement the agent's visual reasoning
-- a fast capture-compare-fix loop with actionable, low-noise issue reports
-- structured outputs that give agents exact values instead of vague descriptions
-- optional LLM-assisted semantic labeling that bridges pixels and meaning
+- a fast capture-compare-fix loop with actionable, low-noise, implementation-oriented issue reports
+- structured outputs that help agents form better first-pass implementation plans
+- semantic labels and DOM-aware explanations that bridge pixels and meaning
 
 The tool is not a replacement for the agent's visual understanding. It is a precision instrument that makes the agent's visual understanding actionable.
 
 ## Suggested Next Design Steps
 
-The monorepo structure, JSON schemas, and CLI commands are implemented through Phase 3. The next useful artifacts to define would be:
+The monorepo structure, JSON schemas, and CLI commands are implemented through Phase 4. The next useful artifacts to define would be:
 
-1. the DOM-diff package API: what Playwright queries to run, what computed style properties to extract, how to match DOM elements to extract report nodes
-2. the semantic labeling adapter interface: how to send screenshot and layout data to an LLM, what schema the labels should follow, how to handle the no-LLM fallback
-3. the compare noise reduction strategy: specific heuristics for filtering EXTRA_NODE false positives, merging sub-element regions, and capping issue output
-4. the benchmark corpus: which 20 to 50 screenshots to collect, how to score extraction and comparison quality, how to track regressions
-5. the agent integration model: MCP tool definitions, prompt templates, and example workflows for Claude Code, Cursor, and Codex
+1. the semantic issue schema: how to represent issue anchors, page areas, component roles, and relationship context
+2. the DOM-diff package API: what Playwright queries to run, what computed style properties to extract, how to match DOM elements to semantic reference nodes, and when to fall back to region output
+3. the planning report schema: panel tree, layout strategy, repeated structures, typography summary, and implementation hints
+4. the typography confidence pipeline: OCR preprocessing, text grouping, hierarchy extraction, and confidence scoring
+5. the benchmark corpus and scoring model: which 20 to 50 screenshots to collect, how to score planning usefulness and DOM diff usefulness, and how to track regressions
 
-## Lessons Learned From Phases 1 Through 3
+## Lessons Learned From Phases 1 Through 4
 
-These lessons, drawn from three rounds of agent testing, should inform all future development:
+These lessons, drawn from four rounds of agent testing, should inform all future development:
 
 1. **The compare loop is the most valuable feature.** Agents consistently rated capture-compare-heatmap as the most useful workflow. Invest in making it faster, less noisy, and more actionable.
 
@@ -675,3 +706,9 @@ These lessons, drawn from three rounds of agent testing, should inform all futur
 6. **OCR should be on by default.** Typography data is too important to be opt-in. Every agent that tested the tool noted the absence of text data as a significant limitation.
 
 7. **Deterministic pixel analysis cannot recover semantic structure.** Flood-fill region detection, edge detection, and connected components cannot distinguish a button from a card from a sidebar. This is a hard ceiling of the current approach, not a tuning problem. Semantic understanding requires either LLM assistance or a fundamentally different CV approach.
+
+8. **DOM-aware iteration must earn its complexity.** DOM diff is promising, but if it does not produce clearly more actionable fixes than the heatmap-driven compare loop, agents will ignore it.
+
+9. **Implementation planning is a separate product need from iteration.** Agents can iterate toward a screenshot today, but they still need better first-pass page structure before they can build efficiently.
+
+10. **Typography is part of structure, not just styling.** Weak text extraction does not only hurt polish. It also damages hierarchy detection, spacing judgment, and first-pass implementation planning.
