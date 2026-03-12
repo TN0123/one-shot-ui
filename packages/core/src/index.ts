@@ -413,36 +413,21 @@ export function buildSemanticAnchors(
 
   const anchors: SemanticAnchor[] = [];
   const panelAnchors = new Map<string, SemanticAnchor>();
+  const usedNames = new Set<string>();
 
-  if (page) {
-    const shellNames = ["left rail", "task list", "calendar board", "summary panel"] as const;
-    buildSyntheticShellPanels(pageWidth, pageHeight).forEach((panel, index) => {
-      anchors.push({
-        id: `anchor-${anchors.length + 1}`,
-        nodeId: null,
-        name: shellNames[index]!,
-        role: "panel",
-        parentId: null,
-        bounds: panel.bounds,
-        confidence: 0.45
-      });
-    });
-  }
-
-  const panelSeed: Array<LayoutNode | { bounds: Bounds }> = largePanels.length >= 3 || contentCoverage > 0.45
+  // Use detected large panels when coverage is sufficient, otherwise supplement
+  // with a minimal synthetic shell (header + body) instead of assuming a specific layout
+  const panelSeed: Array<LayoutNode | { bounds: Bounds }> = largePanels.length >= 2 || contentCoverage > 0.35
     ? largePanels
-    : buildSyntheticShellPanels(pageWidth, pageHeight);
+    : [...largePanels, ...buildSyntheticShell(pageWidth, pageHeight)];
 
-  panelSeed.forEach((node, index) => {
-    const name = inferPanelName(node as LayoutNode, pageWidth, index, panelSeed.length);
-    if (anchors.some((anchor) => anchor.name === name && anchor.nodeId === null)) {
-      return;
-    }
+  panelSeed.forEach((node) => {
+    const { name, role } = classifyPanel(node.bounds, pageWidth, pageHeight, usedNames);
     const anchor: SemanticAnchor = {
       id: `anchor-${anchors.length + 1}`,
       nodeId: isLayoutNode(node) ? node.id : null,
       name,
-      role: "panel",
+      role,
       parentId: null,
       bounds: node.bounds,
       confidence: isLayoutNode(node) ? 0.72 : 0.42
@@ -475,12 +460,12 @@ export function buildSemanticAnchors(
       .sort((left, right) => left.bounds.y - right.bounds.y || left.bounds.x - right.bounds.x);
 
     siblings.forEach((node, index) => {
-      const name = inferChildAnchorName(parentAnchor.name, node, index, siblings.length, textBlocks);
+      const name = inferChildAnchorName(parentAnchor.name, node, parentAnchor.bounds, index, siblings.length, textBlocks, usedNames);
       anchors.push({
         id: `anchor-${anchors.length + 1}`,
         nodeId: node.id,
         name,
-        role: inferChildRole(parentAnchor.name, node, index, siblings.length),
+        role: inferChildRole(node, parentAnchor.bounds, index, siblings.length),
         parentId: parentAnchor.id,
         bounds: node.bounds,
         confidence: 0.52
@@ -534,26 +519,65 @@ export function buildImplementationPlan(input: {
   };
 }
 
-function inferPanelName(node: LayoutNode, pageWidth: number, index: number, panelCount: number): string {
-  const relX = node.bounds.x / Math.max(1, pageWidth);
-  if (panelCount >= 4) {
-    if (index === 0 || relX < 0.08) return "left rail";
-    if (index === 1 || relX < 0.32) return "task list";
-    if (index === panelCount - 1 || relX > 0.72) return "summary panel";
-    return "calendar board";
+function classifyPanel(
+  bounds: Bounds,
+  pageWidth: number,
+  pageHeight: number,
+  usedNames: Set<string>
+): { name: string; role: string } {
+  const relX = bounds.x / Math.max(1, pageWidth);
+  const relY = bounds.y / Math.max(1, pageHeight);
+  const relW = bounds.width / Math.max(1, pageWidth);
+  const relH = bounds.height / Math.max(1, pageHeight);
+  const relRight = relX + relW;
+  const relBottom = relY + relH;
+
+  let name: string;
+  let role: string;
+
+  if (relW > 0.6 && relH < 0.18 && relY < 0.05) {
+    // Wide, short, pinned to top → header
+    name = "header"; role = "header";
+  } else if (relW > 0.6 && relH < 0.18 && relBottom > 0.88) {
+    // Wide, short, pinned to bottom → footer
+    name = "footer"; role = "footer";
+  } else if (relW < 0.1 && relH > 0.4 && relX < 0.05) {
+    // Very narrow, tall, left edge → icon nav rail
+    name = "nav-rail"; role = "navigation";
+  } else if (relW < 0.28 && relH > 0.4 && relX < 0.12) {
+    // Moderate narrow, tall, left side → sidebar
+    name = "left-sidebar"; role = "sidebar";
+  } else if (relW < 0.28 && relH > 0.4 && relRight > 0.88) {
+    // Moderate narrow, tall, right side → sidebar
+    name = "right-sidebar"; role = "sidebar";
+  } else if (relW > 0.4 && relH > 0.5) {
+    // Large central area → main content
+    name = "main-content"; role = "main";
+  } else if (relW > 0.4 && relH < 0.25) {
+    // Wide but short strip → banner/bar
+    name = "banner"; role = "banner";
+  } else {
+    // Generic section
+    name = "section"; role = "section";
   }
-  if (relX < 0.1) return "left rail";
-  if (relX < 0.38) return "left panel";
-  if (relX > 0.72) return "right panel";
-  return "main content";
+
+  // Deduplicate names
+  if (usedNames.has(name)) {
+    let counter = 2;
+    while (usedNames.has(`${name}-${counter}`)) counter++;
+    name = `${name}-${counter}`;
+  }
+  usedNames.add(name);
+
+  return { name, role };
 }
 
-function buildSyntheticShellPanels(pageWidth: number, pageHeight: number): Array<{ bounds: Bounds }> {
+function buildSyntheticShell(pageWidth: number, pageHeight: number): Array<{ bounds: Bounds }> {
+  // Minimal generic fallback: a header strip + main body area
+  const headerHeight = Math.round(pageHeight * 0.08);
   return [
-    { bounds: { x: 0, y: 0, width: Math.round(pageWidth * 0.06), height: pageHeight } },
-    { bounds: { x: Math.round(pageWidth * 0.06), y: 0, width: Math.round(pageWidth * 0.20), height: pageHeight } },
-    { bounds: { x: Math.round(pageWidth * 0.26), y: 0, width: Math.round(pageWidth * 0.50), height: pageHeight } },
-    { bounds: { x: Math.round(pageWidth * 0.76), y: 0, width: pageWidth - Math.round(pageWidth * 0.76), height: pageHeight } }
+    { bounds: { x: 0, y: 0, width: pageWidth, height: headerHeight } },
+    { bounds: { x: 0, y: headerHeight, width: pageWidth, height: pageHeight - headerHeight } }
   ];
 }
 
@@ -581,48 +605,76 @@ function findBestParentPanel(node: LayoutNode, panels: LayoutNode[]): LayoutNode
 function inferChildAnchorName(
   parentName: string,
   node: LayoutNode,
+  parentBounds: Bounds,
   index: number,
   siblingCount: number,
-  textBlocks: TextBlock[]
+  textBlocks: TextBlock[],
+  usedNames: Set<string>
 ): string {
   const nearbyText = textBlocks.find((block) => overlaps(block.bounds, node.bounds));
-  if (parentName === "left rail") {
-    return index === 0 ? "left rail brand" : index >= siblingCount - 2 ? `left rail utility ${index - siblingCount + 3}` : `left rail icon ${index}`;
+  const relY = (node.bounds.y - parentBounds.y) / Math.max(1, parentBounds.height);
+  const relW = node.bounds.width / Math.max(1, parentBounds.width);
+
+  let name: string;
+
+  if (relY < 0.1 && relW > 0.6) {
+    // Top-spanning child → header of this parent
+    name = `${parentName} header`;
+  } else if (relY > 0.88 && relW > 0.6) {
+    // Bottom-spanning child → footer of this parent
+    name = `${parentName} footer`;
+  } else if (nearbyText?.text && nearbyText.text.trim().length > 1) {
+    // Use nearby text content as a natural label
+    name = normalizeAnchorLabel(`${parentName} ${nearbyText.text}`);
+  } else {
+    name = `${parentName} item ${index + 1}`;
   }
-  if (parentName === "task list") {
-    if (node.bounds.y < 220) return "task list header";
-    if (nearbyText?.text) return normalizeAnchorLabel(nearbyText.text);
-    return `task row ${index}`;
+
+  // Deduplicate
+  if (usedNames.has(name)) {
+    let counter = 2;
+    while (usedNames.has(`${name} ${counter}`)) counter++;
+    name = `${name} ${counter}`;
   }
-  if (parentName === "calendar board") {
-    if (node.bounds.y < 220) return "calendar toolbar";
-    return `calendar column ${index + 1}`;
-  }
-  if (parentName === "summary panel") {
-    if (node.bounds.y < 180) return "summary toolbar";
-    if (nearbyText?.text) return normalizeAnchorLabel(nearbyText.text);
-    return index === 0 ? "summary composer" : `summary section ${index}`;
-  }
-  return `${parentName} item ${index + 1}`;
+  usedNames.add(name);
+
+  return name;
 }
 
-function inferChildRole(parentName: string, node: LayoutNode, index: number, siblingCount: number): string {
-  if (parentName === "left rail") return index === 0 ? "brand" : index >= siblingCount - 2 ? "utility" : "icon";
-  if (parentName === "task list") return node.bounds.y < 220 ? "header" : "row";
-  if (parentName === "calendar board") return node.bounds.y < 220 ? "toolbar" : "column";
-  if (parentName === "summary panel") return index === 0 ? "toolbar" : index === 1 ? "composer" : "section";
-  return "section";
+function inferChildRole(
+  node: LayoutNode,
+  parentBounds: Bounds,
+  index: number,
+  siblingCount: number
+): string {
+  const relY = (node.bounds.y - parentBounds.y) / Math.max(1, parentBounds.height);
+  const relW = node.bounds.width / Math.max(1, parentBounds.width);
+  const relH = node.bounds.height / Math.max(1, parentBounds.height);
+  const aspectRatio = node.bounds.width / Math.max(1, node.bounds.height);
+
+  // Top-spanning element → header or toolbar
+  if (relY < 0.1 && relW > 0.6) return "header";
+  // Bottom-spanning element → footer
+  if (relY > 0.88 && relW > 0.6) return "footer";
+  // Small and roughly square → icon or thumbnail
+  if (relW < 0.15 && relH < 0.1 && aspectRatio > 0.5 && aspectRatio < 2) return "icon";
+  // Wide and short → row
+  if (aspectRatio > 3 && relW > 0.5) return "row";
+  // Tall and narrow → column
+  if (aspectRatio < 0.3 && relH > 0.4) return "column";
+
+  return "item";
 }
 
 function inferNodeStrategy(anchor: SemanticAnchor, layoutStrategy?: LayoutStrategy): ImplementationPlanNode["strategy"] {
   if (anchor.role === "column" || anchor.role === "row") {
     return "grid";
   }
-  if (anchor.role === "toolbar" || anchor.role === "icon") {
+  if (anchor.role === "header" || anchor.role === "footer" || anchor.role === "navigation" || anchor.role === "icon") {
     return "flex";
   }
-  if (anchor.role === "composer") {
-    return "stack";
+  if (anchor.role === "main" || anchor.role === "section") {
+    return layoutStrategy?.type === "grid" ? "grid" : layoutStrategy?.type === "flex" ? "flex" : "stack";
   }
   if (layoutStrategy?.type === "grid" || layoutStrategy?.type === "flex" || layoutStrategy?.type === "absolute") {
     return layoutStrategy.type;
@@ -632,12 +684,15 @@ function inferNodeStrategy(anchor: SemanticAnchor, layoutStrategy?: LayoutStrate
 
 function inferRepeatedPatterns(anchors: SemanticAnchor[]): string[] {
   const results: string[] = [];
-  const iconCount = anchors.filter((anchor) => anchor.role === "icon").length;
-  const rowCount = anchors.filter((anchor) => anchor.role === "row").length;
-  const columnCount = anchors.filter((anchor) => anchor.role === "column").length;
-  if (iconCount >= 3) results.push("repeated icon buttons in the left rail");
-  if (rowCount >= 3) results.push("stacked task rows with shared spacing and selection styling");
-  if (columnCount >= 3) results.push("repeated calendar day columns with shared grid lines");
+  const roleCounts = new Map<string, number>();
+  for (const anchor of anchors) {
+    roleCounts.set(anchor.role, (roleCounts.get(anchor.role) ?? 0) + 1);
+  }
+  for (const [role, count] of roleCounts) {
+    if (count >= 3) {
+      results.push(`repeated ${role} elements (${count} instances) with shared styling`);
+    }
+  }
   return results;
 }
 
@@ -645,24 +700,33 @@ function inferCssPrimitives(layoutStrategy: LayoutStrategy | undefined, anchors:
   const primitives = new Set<string>();
   primitives.add("CSS custom properties for colors, borders, and spacing");
   if (layoutStrategy?.type === "grid" || anchors.some((anchor) => anchor.role === "column")) {
-    primitives.add("CSS grid for the page shell and calendar columns");
+    primitives.add("CSS grid for multi-column layout sections");
   }
-  if (layoutStrategy?.type === "flex" || anchors.some((anchor) => anchor.role === "toolbar" || anchor.role === "icon")) {
-    primitives.add("Flex rows for toolbars and compact controls");
+  if (layoutStrategy?.type === "flex" || anchors.some((anchor) => anchor.role === "header" || anchor.role === "footer" || anchor.role === "navigation" || anchor.role === "icon")) {
+    primitives.add("Flexbox for horizontal alignment in headers, navs, and toolbars");
   }
-  if (anchors.some((anchor) => anchor.role === "composer")) {
-    primitives.add("Layered card styling for the composer area");
+  if (anchors.some((anchor) => anchor.role === "sidebar")) {
+    primitives.add("Fixed-width sidebar with fluid main content area");
+  }
+  if (anchors.some((anchor) => anchor.role === "row")) {
+    primitives.add("Stacked flex rows for list or card layouts");
   }
   return [...primitives];
 }
 
 function buildPageNotes(layoutStrategy: LayoutStrategy | undefined, anchors: SemanticAnchor[]): string[] {
+  const strategy = layoutStrategy?.type ?? "mixed";
   const notes = [
-    `Use ${layoutStrategy?.type ?? "mixed"} layout as the primary page shell strategy.`,
-    "Treat the largest anchors as stable page panels so compare output stays consistent across iterations."
+    `Use ${strategy} layout as the primary page strategy.`,
+    "Treat the largest anchors as stable page sections; preserve their proportions across iterations."
   ];
-  if (anchors.some((anchor) => anchor.name === "calendar board")) {
-    notes.push("The calendar board should keep equal-width day columns and a reserved hour gutter.");
+  const topLevelCount = anchors.filter((a) => a.parentId === null).length;
+  if (topLevelCount >= 3) {
+    notes.push(`Page has ${topLevelCount} top-level sections; maintain their relative sizing and ordering.`);
+  }
+  const hasSidebar = anchors.some((a) => a.role === "sidebar" || a.role === "navigation");
+  if (hasSidebar) {
+    notes.push("Sidebar/nav should have a fixed width; main content should fill remaining space.");
   }
   return notes;
 }

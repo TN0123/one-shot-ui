@@ -9,7 +9,7 @@ Phase 6 adds a benchmark surface and tighter compare contracts. These templates 
 3. Implement the page shell.
 4. `bun packages/cli/src/index.ts capture --file <index.html> --output <impl.png> --width <w> --height <h>`
 5. `bun packages/cli/src/index.ts compare <reference.png> <impl.png> --json --top 12`
-6. If a panel needs isolated work: `bun packages/cli/src/index.ts compare <reference.png> <impl.png> --json --region "<anchor>"`
+6. If a section needs isolated work: `bun packages/cli/src/index.ts compare <reference.png> <impl.png> --json --region "<anchor>"` (anchors are auto-detected, e.g. "header", "left-sidebar", "main-content")
 7. If semantic coverage falls back, trust the scoped pixel mismatch first and avoid overfitting to missing semantic labels.
 
 ## Prompt template: planning
