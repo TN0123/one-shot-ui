@@ -72,6 +72,7 @@ export const textBlockSchema = z.object({
     fontWeight: z.number().int().min(100).max(900).nullable(),
     lineHeight: z.number().positive().nullable(),
     letterSpacing: z.number().nullable(),
+    textAlignment: z.enum(["left", "center", "right", "justify"]).nullable().optional(),
     fontFamilyCandidates: z.array(fontFamilyCandidateSchema).optional(),
     confidence: z.number().min(0).max(1)
   }).nullable()
@@ -87,6 +88,21 @@ export const layoutNodeSchema = z.object({
   shadow: shadowSpecSchema.nullable().optional(),
   componentId: z.string().nullable(),
   confidence: z.number().min(0).max(1)
+});
+
+export const hierarchicalNodeSchema: z.ZodType<any> = z.object({
+  id: z.string(),
+  kind: z.enum(["region", "text"]),
+  bounds: boundsSchema,
+  fill: z.string().regex(/^#[0-9A-F]{6}$/i).nullable(),
+  gradient: gradientSpecSchema.nullable().optional(),
+  borderRadius: z.number().nonnegative().nullable(),
+  shadow: shadowSpecSchema.nullable().optional(),
+  componentId: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  children: z.lazy(() => z.array(hierarchicalNodeSchema)),
+  parentId: z.string().nullable(),
+  depth: z.number().int().nonnegative()
 });
 
 export const spacingMeasurementSchema = z.object({
@@ -188,6 +204,30 @@ export const extractReportSchema = z.object({
   semanticAnchors: z.array(semanticAnchorSchema).optional(),
   implementationPlan: implementationPlanSchema.optional(),
   layoutStrategy: layoutStrategySchema.optional(),
+  hierarchy: z.array(hierarchicalNodeSchema).optional(),
+  annotations: z.array(z.object({
+    nodeId: z.string(),
+    label: z.string(),
+    bounds: boundsSchema,
+    measurements: z.object({
+      exactX: z.number(),
+      exactY: z.number(),
+      exactWidth: z.number(),
+      exactHeight: z.number(),
+      fill: z.string().nullable(),
+      borderRadius: z.number().nullable(),
+      fontSize: z.number().nullable(),
+      fontWeight: z.number().nullable(),
+      lineHeight: z.number().nullable(),
+      letterSpacing: z.number().nullable()
+    }),
+    spacingToNeighbors: z.array(z.object({
+      targetId: z.string(),
+      targetLabel: z.string(),
+      axis: z.enum(["horizontal", "vertical"]),
+      distance: z.number()
+    }))
+  })).optional(),
   diagnostics: z.object({
     background: z.string().regex(/^#[0-9A-F]{6}$/i),
     activePixelRatio: z.number().min(0).max(1)
@@ -227,7 +267,9 @@ export const compareIssueSchema = z.object({
   cssProperty: z.string().optional(),
   cssSelector: z.string().optional(),
   reference: z.unknown().optional(),
-  implementation: z.unknown().optional()
+  implementation: z.unknown().optional(),
+  issueBounds: boundsSchema.optional(),
+  visualWeight: z.number().min(0).max(1).optional()
 });
 
 export const compareOptionsSchema = z.object({
@@ -259,7 +301,13 @@ export const compareReportSchema = z.object({
   }),
   issues: z.array(compareIssueSchema),
   artifacts: z.object({
-    heatmapPath: z.string().nullable()
+    heatmapPath: z.string().nullable(),
+    regionHeatmaps: z.array(z.object({
+      region: z.string(),
+      heatmapPath: z.string(),
+      bounds: boundsSchema,
+      mismatchRatio: z.number().min(0).max(1)
+    })).optional()
   })
 });
 
@@ -372,6 +420,7 @@ export type SpacingMeasurement = z.infer<typeof spacingMeasurementSchema>;
 export type ComponentCluster = z.infer<typeof componentClusterSchema>;
 export type SemanticLabel = z.infer<typeof semanticLabelSchema>;
 export type SemanticAnchor = z.infer<typeof semanticAnchorSchema>;
+export type HierarchicalNode = z.infer<typeof hierarchicalNodeSchema>;
 export type LayoutStrategy = z.infer<typeof layoutStrategySchema>;
 export type DomElement = z.infer<typeof domElementSchema>;
 export type ImplementationPlanNode = z.infer<typeof implementationPlanNodeSchema>;
@@ -388,6 +437,29 @@ export type BenchmarkManifest = z.infer<typeof benchmarkManifestSchema>;
 export type BenchmarkRegionResult = z.infer<typeof benchmarkRegionResultSchema>;
 export type BenchmarkCaseResult = z.infer<typeof benchmarkCaseResultSchema>;
 export type BenchmarkSuiteReport = z.infer<typeof benchmarkSuiteReportSchema>;
+export type OverlayAnnotation = {
+  nodeId: string;
+  label: string;
+  bounds: Bounds;
+  measurements: {
+    exactX: number;
+    exactY: number;
+    exactWidth: number;
+    exactHeight: number;
+    fill: string | null;
+    borderRadius: number | null;
+    fontSize: number | null;
+    fontWeight: number | null;
+    lineHeight: number | null;
+    letterSpacing: number | null;
+  };
+  spacingToNeighbors: Array<{
+    targetId: string;
+    targetLabel: string;
+    axis: "horizontal" | "vertical";
+    distance: number;
+  }>;
+};
 
 export function buildSemanticAnchors(
   nodes: LayoutNode[],

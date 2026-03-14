@@ -335,6 +335,104 @@ function colorVariance(samples: Array<{ r: number; g: number; b: number }>): num
   return Math.abs(first.r - last.r) + Math.abs(first.g - last.g) + Math.abs(first.b - last.b);
 }
 
+// --- Image and asset awareness ---
+
+export type AssetType = "solid" | "gradient" | "image" | "icon" | "decorative" | "unknown";
+
+export interface AssetClassification {
+  type: AssetType;
+  confidence: number;
+  placeholderStrategy: "solid-color" | "gradient" | "placeholder-image" | "svg-placeholder" | "none";
+  dominantColor: string;
+}
+
+/**
+ * Classify a layout region as a solid fill, gradient, photographic image, icon,
+ * or decorative element. Suggests a placeholder strategy for each type.
+ */
+export function classifyAsset(image: ImageAsset, bounds: Bounds): AssetClassification {
+  if (bounds.width < 4 || bounds.height < 4) {
+    return { type: "unknown", confidence: 0.2, placeholderStrategy: "none", dominantColor: "#000000" };
+  }
+
+  const variance = measurePixelVariance(image, bounds);
+  const edgeComplexity = measureEdgeComplexity(image, bounds);
+  const aspectRatio = bounds.width / Math.max(1, bounds.height);
+  const area = bounds.width * bounds.height;
+  const dominantColor = estimateNodeFill(image, bounds) ?? "#808080";
+
+  // Small, roughly square, moderate variance → icon
+  if (area < 3600 && Math.abs(aspectRatio - 1) < 0.5 && variance > 200 && edgeComplexity < 0.4) {
+    return { type: "icon", confidence: 0.65, placeholderStrategy: "svg-placeholder", dominantColor };
+  }
+
+  // High pixel variance with complex edges → photographic image
+  if (variance > 800 && edgeComplexity > 0.3) {
+    return { type: "image", confidence: 0.7, placeholderStrategy: "placeholder-image", dominantColor };
+  }
+
+  // Moderate variance → decorative element
+  if (variance > 400 && variance <= 800) {
+    return { type: "decorative", confidence: 0.5, placeholderStrategy: "gradient", dominantColor };
+  }
+
+  // Low variance: check for gradient
+  const gradient = detectGradient(image, bounds);
+  if (gradient) {
+    return { type: "gradient", confidence: gradient.confidence, placeholderStrategy: "gradient", dominantColor };
+  }
+
+  return { type: "solid", confidence: 0.8, placeholderStrategy: "solid-color", dominantColor };
+}
+
+function measurePixelVariance(image: ImageAsset, bounds: Bounds): number {
+  const samples: Array<{ r: number; g: number; b: number }> = [];
+  const stepX = Math.max(1, Math.floor(bounds.width / 16));
+  const stepY = Math.max(1, Math.floor(bounds.height / 16));
+
+  for (let y = bounds.y; y < bounds.y + bounds.height; y += stepY) {
+    for (let x = bounds.x; x < bounds.x + bounds.width; x += stepX) {
+      const [r, g, b] = samplePixel(image, x, y);
+      samples.push({ r, g, b });
+    }
+  }
+
+  if (samples.length < 4) return 0;
+
+  const meanR = samples.reduce((s, p) => s + p.r, 0) / samples.length;
+  const meanG = samples.reduce((s, p) => s + p.g, 0) / samples.length;
+  const meanB = samples.reduce((s, p) => s + p.b, 0) / samples.length;
+
+  return samples.reduce((s, p) =>
+    s + (p.r - meanR) ** 2 + (p.g - meanG) ** 2 + (p.b - meanB) ** 2, 0
+  ) / samples.length;
+}
+
+function measureEdgeComplexity(image: ImageAsset, bounds: Bounds): number {
+  let edgeCount = 0;
+  let totalPairs = 0;
+  const stepX = Math.max(1, Math.floor(bounds.width / 20));
+  const stepY = Math.max(1, Math.floor(bounds.height / 20));
+  const threshold = 30;
+
+  for (let y = bounds.y; y < bounds.y + bounds.height - stepY; y += stepY) {
+    for (let x = bounds.x; x < bounds.x + bounds.width - stepX; x += stepX) {
+      const [r1, g1, b1] = samplePixel(image, x, y);
+      const [r2, g2, b2] = samplePixel(image, x + stepX, y);
+      const [r3, g3, b3] = samplePixel(image, x, y + stepY);
+
+      const hDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+      const vDiff = Math.abs(r1 - r3) + Math.abs(g1 - g3) + Math.abs(b1 - b3);
+
+      if (hDiff > threshold) edgeCount++;
+      if (vDiff > threshold) edgeCount++;
+      totalPairs += 2;
+    }
+  }
+
+  return totalPairs === 0 ? 0 : edgeCount / totalPairs;
+}
+
 function isMonotonicGradient(samples: Array<{ r: number; g: number; b: number }>): boolean {
   if (samples.length < 3) return true;
 

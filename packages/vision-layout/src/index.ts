@@ -476,3 +476,188 @@ function resolveAlignment(startA: number, sizeA: number, startB: number, sizeB: 
   }
   return "overlap";
 }
+
+export interface HierarchicalLayoutNode {
+  id: string;
+  kind: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  fill: string | null;
+  gradient?: any;
+  borderRadius: number | null;
+  shadow?: any;
+  componentId: string | null;
+  confidence: number;
+  children: HierarchicalLayoutNode[];
+  parentId: string | null;
+  depth: number;
+}
+
+export function buildLayoutHierarchy(nodes: LayoutNode[]): HierarchicalLayoutNode[] {
+  const sorted = [...nodes].sort((a, b) => {
+    const areaA = a.bounds.width * a.bounds.height;
+    const areaB = b.bounds.width * b.bounds.height;
+    return areaB - areaA;
+  });
+
+  const hierarchyNodes: Map<string, HierarchicalLayoutNode> = new Map();
+  const roots: HierarchicalLayoutNode[] = [];
+
+  for (const node of sorted) {
+    hierarchyNodes.set(node.id, {
+      id: node.id,
+      kind: node.kind,
+      bounds: node.bounds,
+      fill: node.fill,
+      gradient: (node as any).gradient ?? undefined,
+      borderRadius: node.borderRadius,
+      shadow: (node as any).shadow ?? undefined,
+      componentId: node.componentId,
+      confidence: node.confidence,
+      children: [],
+      parentId: null,
+      depth: 0
+    });
+  }
+
+  for (const node of sorted) {
+    const hNode = hierarchyNodes.get(node.id)!;
+    let bestParent: HierarchicalLayoutNode | null = null;
+    let bestParentArea = Infinity;
+
+    for (const candidate of sorted) {
+      if (candidate.id === node.id) continue;
+      const candidateArea = candidate.bounds.width * candidate.bounds.height;
+      const nodeArea = node.bounds.width * node.bounds.height;
+      if (candidateArea <= nodeArea) continue;
+      if (!hierarchyContains(candidate.bounds, node.bounds)) continue;
+      if (candidateArea < bestParentArea) {
+        bestParent = hierarchyNodes.get(candidate.id)!;
+        bestParentArea = candidateArea;
+      }
+    }
+
+    if (bestParent) {
+      hNode.parentId = bestParent.id;
+      bestParent.children.push(hNode);
+    } else {
+      roots.push(hNode);
+    }
+  }
+
+  function setDepth(node: HierarchicalLayoutNode, depth: number) {
+    node.depth = depth;
+    for (const child of node.children) {
+      setDepth(child, depth + 1);
+    }
+  }
+  for (const root of roots) {
+    setDepth(root, 0);
+  }
+
+  function sortChildren(node: HierarchicalLayoutNode) {
+    node.children.sort((a, b) => {
+      if (Math.abs(a.bounds.y - b.bounds.y) > 8) return a.bounds.y - b.bounds.y;
+      return a.bounds.x - b.bounds.x;
+    });
+    for (const child of node.children) {
+      sortChildren(child);
+    }
+  }
+  for (const root of roots) {
+    sortChildren(root);
+  }
+
+  return roots;
+}
+
+function hierarchyContains(
+  outer: { x: number; y: number; width: number; height: number },
+  inner: { x: number; y: number; width: number; height: number }
+): boolean {
+  return (
+    inner.x >= outer.x - 2 &&
+    inner.y >= outer.y - 2 &&
+    inner.x + inner.width <= outer.x + outer.width + 2 &&
+    inner.y + inner.height <= outer.y + outer.height + 2
+  );
+}
+
+export function detectLayoutBoxesFine(image: ImageAsset): LayoutNode[] {
+  const FINE_GRID = 4;
+  const cols = Math.ceil(image.width / FINE_GRID);
+  const rows = Math.ceil(image.height / FINE_GRID);
+  const background = hexToRgb(detectBackgroundColor(image));
+  const active = Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      active[row]![col] = isActiveCellAtGrid(image, col, row, background, FINE_GRID);
+    }
+  }
+
+  const visited = Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
+  const nodes: LayoutNode[] = [];
+  let index = 0;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      if (!active[row]![col] || visited[row]![col]) continue;
+      const component = floodFill(active, visited, col, row);
+      if (component.length < 2) continue;
+
+      const xs = component.map(([x]) => x);
+      const ys = component.map(([, y]) => y);
+      const minCol = Math.min(...xs);
+      const maxCol = Math.max(...xs);
+      const minRow = Math.min(...ys);
+      const maxRow = Math.max(...ys);
+      const centerX = Math.min(image.width - 1, Math.floor((minCol + maxCol + 1) * FINE_GRID * 0.5));
+      const centerY = Math.min(image.height - 1, Math.floor((minRow + maxRow + 1) * FINE_GRID * 0.5));
+      const [r, g, b] = samplePixel(image, centerX, centerY);
+
+      nodes.push({
+        id: `region-${++index}`,
+        kind: "region",
+        bounds: {
+          x: minCol * FINE_GRID,
+          y: minRow * FINE_GRID,
+          width: Math.min(image.width - minCol * FINE_GRID, (maxCol - minCol + 1) * FINE_GRID),
+          height: Math.min(image.height - minRow * FINE_GRID, (maxRow - minRow + 1) * FINE_GRID)
+        },
+        fill: rgbToHex(r, g, b),
+        borderRadius: null,
+        componentId: null,
+        confidence: Math.min(0.95, 0.45 + component.length / (rows * cols))
+      });
+    }
+  }
+
+  return nodes.sort((a, b) => {
+    if (a.bounds.y === b.bounds.y) return a.bounds.x - b.bounds.x;
+    return a.bounds.y - b.bounds.y;
+  });
+}
+
+function isActiveCellAtGrid(
+  image: ImageAsset,
+  col: number,
+  row: number,
+  background: { r: number; g: number; b: number },
+  gridSize: number
+): boolean {
+  const startX = col * gridSize;
+  const startY = row * gridSize;
+  let delta = 0;
+  let count = 0;
+
+  for (let y = startY; y < Math.min(startY + gridSize, image.height); y++) {
+    for (let x = startX; x < Math.min(startX + gridSize, image.width); x++) {
+      const [r, g, b, a] = samplePixel(image, x, y);
+      if (a < 8) continue;
+      delta += Math.abs(r - background.r) + Math.abs(g - background.g) + Math.abs(b - background.b);
+      count += 1;
+    }
+  }
+
+  return count > 0 && delta / count > 32;
+}

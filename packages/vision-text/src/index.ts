@@ -63,20 +63,28 @@ function estimateTypography(
     return null;
   }
 
-  const fontSize = Math.max(8, Math.round(bounds.height * 0.58));
-  const lineHeight = Math.round(fontSize * 1.35);
+  const { capTop, baseline } = detectBaselineCapHeight(image, bounds);
+  const measuredHeight = baseline - capTop;
+  const fontSize = measuredHeight > 4
+    ? Math.max(8, Math.round(measuredHeight * 0.72))
+    : Math.max(8, Math.round(bounds.height * 0.58));
+  const lineHeight = Math.round(bounds.height > fontSize * 2
+    ? detectInternalLineHeight(image, bounds, fontSize)
+    : fontSize * 1.35);
   const foregroundRatio = estimateForegroundRatio(image, bounds);
   const fontWeight = foregroundRatio > 0.34 ? 700 : foregroundRatio > 0.24 ? 600 : 400;
   const averageGlyphWidth = bounds.width / Math.max(1, Math.round(bounds.width / Math.max(fontSize * 0.48, 1)));
   const letterSpacing = Math.round((averageGlyphWidth - fontSize * 0.52) * 10) / 10;
+  const textAlignment = detectTextAlignment(bounds);
 
   return {
     fontSize,
     fontWeight,
     lineHeight,
     letterSpacing,
+    textAlignment,
     fontFamilyCandidates: rankFontFamilies(fontSize, fontWeight, letterSpacing, foregroundRatio),
-    confidence: 0.35 + Math.min(0.4, foregroundRatio)
+    confidence: 0.35 + Math.min(0.4, foregroundRatio) + (measuredHeight > 4 ? 0.1 : 0)
   };
 }
 
@@ -125,6 +133,99 @@ function averageCornerRgb(
   };
 }
 
+function detectBaselineCapHeight(
+  image: Awaited<ReturnType<typeof loadImage>>,
+  bounds: { x: number; y: number; width: number; height: number }
+): { capTop: number; baseline: number } {
+  const background = averageCornerRgb(image, bounds);
+  const threshold = 54;
+  let capTop = bounds.height;
+  let baseline = 0;
+  const sampleStepX = Math.max(1, Math.floor(bounds.width / 32));
+
+  for (let y = 0; y < bounds.height; y++) {
+    for (let x = 0; x < bounds.width; x += sampleStepX) {
+      const [r, g, b, a] = samplePixel(image, bounds.x + x, bounds.y + y);
+      if (a < 16) continue;
+      const dist = Math.abs(r - background.r) + Math.abs(g - background.g) + Math.abs(b - background.b);
+      if (dist > threshold) {
+        if (y < capTop) capTop = y;
+        if (y > baseline) baseline = y;
+      }
+    }
+  }
+
+  if (capTop >= baseline) {
+    return { capTop: 0, baseline: bounds.height };
+  }
+
+  return { capTop, baseline };
+}
+
+function detectInternalLineHeight(
+  image: Awaited<ReturnType<typeof loadImage>>,
+  bounds: { x: number; y: number; width: number; height: number },
+  fontSize: number
+): number {
+  const background = averageCornerRgb(image, bounds);
+  const threshold = 54;
+  const sampleX = bounds.x + Math.floor(bounds.width / 2);
+  const rowActivity: boolean[] = [];
+
+  for (let y = bounds.y; y < bounds.y + bounds.height; y++) {
+    let active = false;
+    for (let dx = -2; dx <= 2; dx++) {
+      const [r, g, b, a] = samplePixel(image, sampleX + dx, y);
+      if (a < 16) continue;
+      const dist = Math.abs(r - background.r) + Math.abs(g - background.g) + Math.abs(b - background.b);
+      if (dist > threshold) { active = true; break; }
+    }
+    rowActivity.push(active);
+  }
+
+  // Find gaps between active regions (line gaps)
+  const gaps: number[] = [];
+  let inGap = false;
+  let gapStart = 0;
+  let lastActiveEnd = 0;
+
+  for (let i = 0; i < rowActivity.length; i++) {
+    if (rowActivity[i]) {
+      if (inGap && i - gapStart >= 2) {
+        gaps.push(i - lastActiveEnd);
+      }
+      inGap = false;
+      lastActiveEnd = i;
+    } else if (!inGap && i > 0 && rowActivity[i - 1]) {
+      inGap = true;
+      gapStart = i;
+    }
+  }
+
+  if (gaps.length === 0) return Math.round(fontSize * 1.35);
+  const avgGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+  return Math.round(fontSize + avgGap);
+}
+
+function detectTextAlignment(
+  bounds: { x: number; y: number; width: number; height: number },
+  parentBounds?: { x: number; y: number; width: number; height: number }
+): "left" | "center" | "right" | "justify" | null {
+  if (!parentBounds) return null;
+
+  const leftMargin = bounds.x - parentBounds.x;
+  const rightMargin = (parentBounds.x + parentBounds.width) - (bounds.x + bounds.width);
+  const totalMargin = leftMargin + rightMargin;
+
+  if (totalMargin < 4) return "justify";
+  const ratio = leftMargin / Math.max(1, totalMargin);
+
+  if (ratio < 0.2) return "left";
+  if (ratio > 0.8) return "right";
+  if (Math.abs(ratio - 0.5) < 0.15) return "center";
+  return "left";
+}
+
 // Font family heuristic database: common web fonts with their metric characteristics.
 // Each entry maps a font to the typical glyph-width-to-fontSize ratio and weight range
 // where it is most commonly used.
@@ -154,7 +255,33 @@ const FONT_DATABASE: Array<{
   { family: "Playfair Display", category: "display", widthRatio: 0.50, commonWeights: [400, 700], commonSizes: [20, 72] },
   { family: "Fira Code", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
   { family: "JetBrains Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
-  { family: "SF Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [11, 16] }
+  { family: "SF Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [11, 16] },
+  { family: "Plus Jakarta Sans", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Manrope", category: "sans-serif", widthRatio: 0.53, commonWeights: [400, 500, 600, 700, 800], commonSizes: [12, 48] },
+  { family: "Outfit", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Space Grotesk", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "IBM Plex Sans", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 36] },
+  { family: "Work Sans", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Figtree", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Satoshi", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 700], commonSizes: [12, 48] },
+  { family: "General Sans", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Sora", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Lexend", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600, 700], commonSizes: [12, 36] },
+  { family: "Urbanist", category: "sans-serif", widthRatio: 0.49, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Red Hat Display", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 700], commonSizes: [14, 72] },
+  { family: "Cabin", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 500, 600, 700], commonSizes: [12, 36] },
+  { family: "Barlow", category: "sans-serif", widthRatio: 0.49, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "Rubik", category: "sans-serif", widthRatio: 0.52, commonWeights: [400, 500, 600, 700], commonSizes: [12, 36] },
+  { family: "Karla", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 700], commonSizes: [12, 36] },
+  { family: "Noto Sans", category: "sans-serif", widthRatio: 0.53, commonWeights: [400, 500, 700], commonSizes: [12, 36] },
+  { family: "Libre Franklin", category: "sans-serif", widthRatio: 0.50, commonWeights: [400, 500, 600, 700], commonSizes: [12, 36] },
+  { family: "Raleway", category: "sans-serif", widthRatio: 0.49, commonWeights: [400, 500, 600, 700], commonSizes: [12, 48] },
+  { family: "PT Sans", category: "sans-serif", widthRatio: 0.51, commonWeights: [400, 700], commonSizes: [12, 36] },
+  { family: "IBM Plex Mono", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
+  { family: "Source Code Pro", category: "monospace", widthRatio: 0.60, commonWeights: [400, 500, 700], commonSizes: [12, 18] },
+  { family: "Lora", category: "serif", widthRatio: 0.53, commonWeights: [400, 500, 600, 700], commonSizes: [14, 48] },
+  { family: "Libre Baskerville", category: "serif", widthRatio: 0.54, commonWeights: [400, 700], commonSizes: [14, 36] },
+  { family: "Fraunces", category: "serif", widthRatio: 0.50, commonWeights: [400, 500, 700], commonSizes: [16, 72] }
 ];
 
 function rankFontFamilies(

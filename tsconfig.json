@@ -14,6 +14,8 @@
     "paths": {
       "@one-shot-ui/core": ["packages/core/src/index.ts"],
       "@one-shot-ui/core/tokens": ["packages/core/src/tokens.ts"],
+      "@one-shot-ui/core/scaffold": ["packages/core/src/scaffold.ts"],
+      "@one-shot-ui/core/overlay": ["packages/core/src/overlay.ts"],
       "@one-shot-ui/image-io": ["packages/image-io/src/index.ts"],
       "@one-shot-ui/vision-layout": ["packages/vision-layout/src/index.ts"],
       "@one-shot-ui/vision-style": ["packages/vision-style/src/index.ts"],

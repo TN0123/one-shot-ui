@@ -127,7 +127,11 @@ function detectTrimmedBounds(
 }
 
 export function rgbToHex(r: number, g: number, b: number): string {
-  return `#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+  return `#${[r, g, b].map((value) => clampChannel(value).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+}
+
+function clampChannel(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
@@ -142,4 +146,3 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
   return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
 }
-

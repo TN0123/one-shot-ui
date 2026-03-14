@@ -173,9 +173,11 @@ export async function compareImages(
   const layoutMatches = matchLayoutNodes(referenceLayout, implementationLayout);
   const matchedImplementationIds = new Set(layoutMatches.map((match) => match.implementation.id));
 
+  const totalImageArea = width * height;
+
   if (!focusDiagnostics.fallbackToPixelOnly) {
     for (const match of layoutMatches) {
-      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors));
+      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors, totalImageArea));
     }
 
     for (const node of referenceLayout) {
@@ -183,6 +185,7 @@ export async function compareImages(
         continue;
       }
       const anchor = resolveAnchor(referenceAnchors, node);
+      const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
       issues.push({
         code: "MISSING_NODE",
         nodeId: node.id,
@@ -192,7 +195,9 @@ export async function compareImages(
         severity: "high",
         message: `${describeAnchor(anchor, node.id)} is missing from the implementation.`,
         suggestedFix: `Add the missing ${describeAnchor(anchor, "region")} using the same fill, size, and border treatment as the reference.`,
-        reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
+        reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
+        issueBounds: node.bounds,
+        visualWeight: nodeVw
       });
     }
 
@@ -204,6 +209,7 @@ export async function compareImages(
         continue;
       }
       const anchor = findClosestAnchor(referenceAnchors, node.bounds);
+      const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
       issues.push({
         code: "EXTRA_NODE",
         nodeId: node.id,
@@ -213,7 +219,9 @@ export async function compareImages(
         severity: "medium",
         message: `The implementation has an extra surface near ${describeAnchor(anchor, "this area")}.`,
         suggestedFix: "Remove the extra surface or merge it into an existing component.",
-        implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius }
+        implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
+        issueBounds: node.bounds,
+        visualWeight: nodeVw
       });
     }
 
@@ -222,10 +230,58 @@ export async function compareImages(
   }
 
   let normalizedHeatmapPath: string | null = null;
+  const regionHeatmaps: Array<{ region: string; heatmapPath: string; bounds: Bounds; mismatchRatio: number }> = [];
+
   if (options.heatmapPath) {
     normalizedHeatmapPath = resolve(options.heatmapPath);
     await mkdir(dirname(normalizedHeatmapPath), { recursive: true });
     await writeFile(normalizedHeatmapPath, PNG.sync.write(diff));
+
+    // Per-region heatmaps
+    const topLevelAnchors = referenceAnchors.filter(a => a.parentId === null);
+    const baseName = normalizedHeatmapPath.replace(/\.png$/i, "");
+
+    for (const anchor of topLevelAnchors) {
+      const rb = anchor.bounds;
+      const regionStartX = Math.max(0, rb.x - startX);
+      const regionStartY = Math.max(0, rb.y - startY);
+      const regionWidth = Math.min(rb.width, width - regionStartX);
+      const regionHeight = Math.min(rb.height, height - regionStartY);
+
+      if (regionWidth <= 0 || regionHeight <= 0) continue;
+
+      const regionDiff = new PNG({ width: regionWidth, height: regionHeight });
+      for (let y = 0; y < regionHeight; y++) {
+        for (let x = 0; x < regionWidth; x++) {
+          const srcIdx = ((regionStartY + y) * width + (regionStartX + x)) * 4;
+          const dstIdx = (y * regionWidth + x) * 4;
+          regionDiff.data[dstIdx] = diff.data[srcIdx] ?? 0;
+          regionDiff.data[dstIdx + 1] = diff.data[srcIdx + 1] ?? 0;
+          regionDiff.data[dstIdx + 2] = diff.data[srcIdx + 2] ?? 0;
+          regionDiff.data[dstIdx + 3] = diff.data[srcIdx + 3] ?? 255;
+        }
+      }
+
+      // Count mismatched pixels in this region (diff color is [255, 64, 64])
+      let regionMismatch = 0;
+      for (let i = 0; i < regionDiff.data.length; i += 4) {
+        if (regionDiff.data[i]! > 200 && regionDiff.data[i + 1]! < 100) {
+          regionMismatch++;
+        }
+      }
+
+      const regionSlug = anchor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const regionHeatmapPath = `${baseName}-${regionSlug}.png`;
+      await mkdir(dirname(regionHeatmapPath), { recursive: true });
+      await writeFile(regionHeatmapPath, PNG.sync.write(regionDiff));
+
+      regionHeatmaps.push({
+        region: anchor.name,
+        heatmapPath: resolve(regionHeatmapPath),
+        bounds: rb,
+        mismatchRatio: regionWidth * regionHeight === 0 ? 0 : regionMismatch / (regionWidth * regionHeight)
+      });
+    }
   }
 
   // Noise reduction: filter low-confidence issues and cap the list
@@ -245,7 +301,8 @@ export async function compareImages(
     },
     issues: filteredIssues,
     artifacts: {
-      heatmapPath: normalizedHeatmapPath
+      heatmapPath: normalizedHeatmapPath,
+      regionHeatmaps: regionHeatmaps.length > 0 ? regionHeatmaps : undefined
     }
   });
 }
@@ -400,11 +457,13 @@ function matchLayoutNodes(referenceNodes: LayoutNode[], implementationNodes: Lay
   return matches;
 }
 
-function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[]): CompareIssue[] {
+function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[], totalImageArea = 1): CompareIssue[] {
   const issues: CompareIssue[] = [];
   const anchor = resolveAnchor(anchors, reference);
   const anchorName = describeAnchor(anchor, reference.id);
   const contextPath = buildContextPath(anchor, anchors);
+  const nodeArea = reference.bounds.width * reference.bounds.height;
+  const vw = Math.min(1, nodeArea / Math.max(1, totalImageArea));
   const deltaX = implementation.bounds.x - reference.bounds.x;
   const deltaY = implementation.bounds.y - reference.bounds.y;
   if (Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6) {
@@ -418,7 +477,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} is offset from the reference.`,
       suggestedFix: buildRelativePositionFix(deltaX, deltaY),
       reference: { x: reference.bounds.x, y: reference.bounds.y },
-      implementation: { x: implementation.bounds.x, y: implementation.bounds.y }
+      implementation: { x: implementation.bounds.x, y: implementation.bounds.y },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   }
 
@@ -435,7 +496,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} size differs from the reference.`,
       suggestedFix: buildRelativeSizeFix(widthDelta, heightDelta, reference.bounds),
       reference: { width: reference.bounds.width, height: reference.bounds.height },
-      implementation: { width: implementation.bounds.width, height: implementation.bounds.height }
+      implementation: { width: implementation.bounds.width, height: implementation.bounds.height },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   }
 
@@ -452,7 +515,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
         message: `${anchorName} border radius differs from the reference.`,
         suggestedFix: `Set border-radius to ${reference.borderRadius}px.`,
         reference: { borderRadius: reference.borderRadius },
-        implementation: { borderRadius: implementation.borderRadius }
+        implementation: { borderRadius: implementation.borderRadius },
+        issueBounds: reference.bounds,
+        visualWeight: vw
       });
     }
   }
@@ -470,7 +535,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
         message: `${anchorName} fill color differs from the reference.`,
         suggestedFix: `Change the fill color to ${reference.fill}.`,
         reference: { fill: reference.fill },
-        implementation: { fill: implementation.fill }
+        implementation: { fill: implementation.fill },
+        issueBounds: reference.bounds,
+        visualWeight: vw
       });
     }
   }
@@ -487,7 +554,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} is missing a shadow present in the reference.`,
       suggestedFix: `Add box-shadow: ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
       reference: { shadow: reference.shadow },
-      implementation: { shadow: null }
+      implementation: { shadow: null },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   } else if (!reference.shadow && implementation.shadow) {
     issues.push({
@@ -500,7 +569,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} has an extra shadow not present in the reference.`,
       suggestedFix: "Remove the box-shadow from this element.",
       reference: { shadow: null },
-      implementation: { shadow: implementation.shadow }
+      implementation: { shadow: implementation.shadow },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   } else if (reference.shadow && implementation.shadow) {
     const blurDelta = Math.abs(reference.shadow.blurRadius - implementation.shadow.blurRadius);
@@ -518,7 +589,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
         message: `${anchorName} shadow differs from the reference.`,
         suggestedFix: `Set box-shadow to ${reference.shadow.xOffset}px ${reference.shadow.yOffset}px ${reference.shadow.blurRadius}px ${reference.shadow.spread}px ${reference.shadow.color}.`,
         reference: { shadow: reference.shadow },
-        implementation: { shadow: implementation.shadow }
+        implementation: { shadow: implementation.shadow },
+        issueBounds: reference.bounds,
+        visualWeight: vw
       });
     }
   }
@@ -537,7 +610,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} is missing a gradient present in the reference.`,
       suggestedFix: `Add background: ${reference.gradient.type}-gradient(${direction}${stops}).`,
       reference: { gradient: reference.gradient },
-      implementation: { gradient: null }
+      implementation: { gradient: null },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   } else if (!reference.gradient && implementation.gradient) {
     issues.push({
@@ -550,7 +625,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       message: `${anchorName} has a gradient not present in the reference.`,
       suggestedFix: "Replace the gradient with a solid fill.",
       reference: { gradient: null },
-      implementation: { gradient: implementation.gradient }
+      implementation: { gradient: implementation.gradient },
+      issueBounds: reference.bounds,
+      visualWeight: vw
     });
   } else if (reference.gradient && implementation.gradient) {
     const refStops = reference.gradient.stops;
@@ -577,7 +654,9 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
         message: `${anchorName} gradient differs from the reference.`,
         suggestedFix: `Set background to ${reference.gradient.type}-gradient(${direction}${stops}).`,
         reference: { gradient: reference.gradient },
-        implementation: { gradient: implementation.gradient }
+        implementation: { gradient: implementation.gradient },
+        issueBounds: reference.bounds,
+        visualWeight: vw
       });
     }
   }

@@ -4,6 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./tokens": "./src/tokens.ts"
+    "./tokens": "./src/tokens.ts",
+    "./scaffold": "./src/scaffold.ts",
+    "./overlay": "./src/overlay.ts"
   }
 }

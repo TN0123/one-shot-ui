@@ -19,7 +19,7 @@ import { captureScreenshot } from "@one-shot-ui/browser-capture";
 import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
-import { detectLayoutBoxes, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
+import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
 import { labelNodes } from "@one-shot-ui/semantic-label";
@@ -34,10 +34,14 @@ program
   .option("--json", "Print full JSON report", false)
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--label", "Enable semantic node labeling (heuristic; provide adapter for LLM)", false)
+  .option("--overlay", "Include structured overlay annotations for LLM vision cross-referencing", false)
+  .option("--fine", "Use fine-grained (4px) layout detection for small details", false)
   .action(async (imagePath, options) => {
     const report = await extractImageReport(imagePath, {
       disableOcr: options.ocr === false,
-      enableLabeling: options.label
+      enableLabeling: options.label,
+      enableOverlay: options.overlay,
+      fineGrid: options.fine
     });
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
@@ -174,6 +178,253 @@ program
   });
 
 program
+  .command("scaffold")
+  .argument("<imagePath>", "Path to the reference screenshot")
+  .option("--json", "Print full JSON report", false)
+  .option("--react", "Generate React component hierarchy", false)
+  .option("--no-ocr", "Disable OCR text extraction")
+  .option("--output <dir>", "Directory to write scaffold files")
+  .action(async (imagePath, options) => {
+    const report = await extractImageReport(imagePath, {
+      disableOcr: options.ocr === false
+    });
+
+    const { generateHtmlScaffold, generateReactScaffold } = await import("@one-shot-ui/core/scaffold");
+
+    const scaffold = generateHtmlScaffold(
+      report.implementationPlan!,
+      report.semanticAnchors ?? [],
+      report.tokens ?? [],
+      report.layout,
+      report.text
+    );
+
+    if (options.react) {
+      const reactOutput = generateReactScaffold(
+        report.implementationPlan!,
+        report.semanticAnchors ?? [],
+        report.tokens ?? [],
+        report.layout,
+        report.text,
+        report.components
+      );
+      scaffold.react = reactOutput;
+    }
+
+    if (options.output) {
+      const outputDir = resolve(options.output);
+      await mkdir(outputDir, { recursive: true });
+      await writeFile(resolve(outputDir, "index.html"), scaffold.html, "utf8");
+      await writeFile(resolve(outputDir, "styles.css"), scaffold.css, "utf8");
+
+      if (scaffold.react) {
+        for (const file of scaffold.react.files) {
+          const filePath = resolve(outputDir, file.path);
+          await mkdir(dirname(filePath), { recursive: true });
+          await writeFile(filePath, file.content, "utf8");
+        }
+      }
+
+      console.log(`Scaffold written to ${outputDir}`);
+      if (scaffold.react) {
+        console.log(`React files: ${scaffold.react.files.length}`);
+      }
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify({ version: VERSION, scaffold }, null, 2));
+      return;
+    }
+
+    console.log(scaffold.html);
+  });
+
+program
+  .command("run")
+  .argument("<referencePath>", "Path to the reference screenshot")
+  .requiredOption("--impl <path>", "Path to implementation HTML file or URL")
+  .option("--output <dir>", "Working directory for intermediate files", "./one-shot-run")
+  .option("--max-passes <n>", "Maximum refinement passes", "5")
+  .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
+  .option("--no-ocr", "Disable OCR text extraction")
+  .option("--json", "Print session log as JSON", false)
+  .action(async (referencePath, options) => {
+    const outputDir = resolve(options.output);
+    await mkdir(outputDir, { recursive: true });
+
+    const maxPasses = Number.parseInt(options.maxPasses, 10);
+    const threshold = Number.parseFloat(options.threshold);
+    const sessionLog: SessionEntry[] = [];
+
+    console.log(`Starting multi-pass orchestration...`);
+    console.log(`Reference: ${referencePath}`);
+    console.log(`Implementation: ${options.impl}`);
+    console.log(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
+    console.log();
+
+    // Step 1: Extract reference
+    console.log(`[Pass 0] Extracting reference...`);
+    const referenceReport = await extractImageReport(resolve(referencePath), {
+      disableOcr: options.ocr === false
+    });
+
+    sessionLog.push({
+      pass: 0,
+      phase: "extract",
+      timestamp: new Date().toISOString(),
+      result: {
+        layoutNodes: referenceReport.layout.length,
+        textBlocks: referenceReport.text.length,
+        anchors: referenceReport.semanticAnchors?.length ?? 0
+      }
+    });
+
+    let currentMismatchRatio = 1;
+    let passNumber = 0;
+
+    while (passNumber < maxPasses && currentMismatchRatio > threshold) {
+      passNumber++;
+      console.log(`[Pass ${passNumber}] Capturing implementation...`);
+
+      // Capture
+      const captureOutput = resolve(outputDir, `pass-${passNumber}-capture.png`);
+      try {
+        const isFile = !options.impl.startsWith("http");
+        await captureScreenshot({
+          url: isFile ? undefined : options.impl,
+          filePath: isFile ? resolve(options.impl) : undefined,
+          outputPath: captureOutput,
+          width: 1440,
+          height: 1024,
+          deviceScaleFactor: 1
+        });
+      } catch (err) {
+        console.error(`Capture failed: ${err instanceof Error ? err.message : String(err)}`);
+        sessionLog.push({
+          pass: passNumber,
+          phase: "capture",
+          timestamp: new Date().toISOString(),
+          error: err instanceof Error ? err.message : String(err)
+        });
+        break;
+      }
+
+      // Compare
+      console.log(`[Pass ${passNumber}] Comparing...`);
+      const heatmapPath = resolve(outputDir, `pass-${passNumber}-heatmap.png`);
+      const compareReport = await compareImages(resolve(referencePath), captureOutput, {
+        heatmapPath,
+        top: 20,
+        disableOcr: options.ocr === false
+      });
+
+      currentMismatchRatio = compareReport.summary.mismatchRatio;
+
+      sessionLog.push({
+        pass: passNumber,
+        phase: "compare",
+        timestamp: new Date().toISOString(),
+        result: {
+          mismatchRatio: currentMismatchRatio,
+          issueCount: compareReport.issues.length,
+          topIssues: compareReport.issues.slice(0, 5).map(i => ({
+            code: i.code,
+            severity: i.severity,
+            message: i.message
+          }))
+        }
+      });
+
+      console.log(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      console.log(`  Issues: ${compareReport.issues.length}`);
+
+      if (currentMismatchRatio <= threshold) {
+        console.log(`\nConverged! Mismatch ratio ${(currentMismatchRatio * 100).toFixed(2)}% <= threshold ${(threshold * 100).toFixed(1)}%`);
+        break;
+      }
+
+      // Region drill-down after first pass
+      if (passNumber >= 2 && referenceReport.semanticAnchors) {
+        console.log(`[Pass ${passNumber}] Drilling into regions...`);
+        const regionIssues: Array<{ region: string; mismatchRatio: number; issues: any[] }> = [];
+
+        for (const anchor of referenceReport.semanticAnchors.filter(a => a.parentId === null)) {
+          try {
+            const regionCompare = await compareImages(resolve(referencePath), captureOutput, {
+              top: 8,
+              disableOcr: options.ocr === false,
+              region: anchor.name
+            });
+
+            if (regionCompare.summary.mismatchRatio > threshold) {
+              regionIssues.push({
+                region: anchor.name,
+                mismatchRatio: regionCompare.summary.mismatchRatio,
+                issues: regionCompare.issues.slice(0, 3)
+              });
+            }
+          } catch {
+            // Skip regions that fail
+          }
+        }
+
+        if (regionIssues.length > 0) {
+          sessionLog.push({
+            pass: passNumber,
+            phase: "drill-down",
+            timestamp: new Date().toISOString(),
+            result: { regionIssues }
+          });
+
+          console.log(`  Region drill-down:`);
+          for (const ri of regionIssues.sort((a, b) => b.mismatchRatio - a.mismatchRatio)) {
+            console.log(`    ${ri.region}: ${(ri.mismatchRatio * 100).toFixed(1)}% mismatch`);
+          }
+        }
+      }
+
+      // Write compare report for this pass
+      await writeFile(
+        resolve(outputDir, `pass-${passNumber}-report.json`),
+        JSON.stringify(compareReport, null, 2),
+        "utf8"
+      );
+
+      console.log(`  Heatmap: ${heatmapPath}`);
+      console.log();
+    }
+
+    // Write session log
+    const sessionReport = {
+      version: VERSION,
+      reference: resolve(referencePath),
+      implementation: options.impl,
+      totalPasses: passNumber,
+      finalMismatchRatio: currentMismatchRatio,
+      converged: currentMismatchRatio <= threshold,
+      threshold,
+      log: sessionLog
+    };
+
+    await writeFile(
+      resolve(outputDir, "session.json"),
+      JSON.stringify(sessionReport, null, 2),
+      "utf8"
+    );
+
+    if (options.json) {
+      console.log(JSON.stringify(sessionReport, null, 2));
+    } else {
+      console.log(`\nSession complete.`);
+      console.log(`  Passes: ${passNumber}`);
+      console.log(`  Final mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      console.log(`  Converged: ${currentMismatchRatio <= threshold ? "yes" : "no"}`);
+      console.log(`  Session log: ${resolve(outputDir, "session.json")}`);
+    }
+  });
+
+program
   .command("benchmark")
   .argument("<manifestPath>", "Path to a benchmark manifest JSON file")
   .option("--json", "Print full JSON report", false)
@@ -306,13 +557,24 @@ program.parseAsync(process.argv);
 interface ExtractOptions {
   disableOcr?: boolean;
   enableLabeling?: boolean;
+  enableOverlay?: boolean;
+  fineGrid?: boolean;
+}
+
+interface SessionEntry {
+  pass: number;
+  phase: string;
+  timestamp: string;
+  result?: any;
+  error?: string;
 }
 
 async function extractImageReport(imagePath: string, options?: ExtractOptions) {
   const normalizedPath = resolve(imagePath);
   const image = await loadImage(normalizedPath);
   const backgroundHex = detectBackgroundColor(image);
-  const layout = enrichLayoutNodes(image, detectLayoutBoxes(image), backgroundHex);
+  const rawNodes = options?.fineGrid ? detectLayoutBoxesFine(image) : detectLayoutBoxes(image);
+  const layout = enrichLayoutNodes(image, rawNodes, backgroundHex);
   const clustered = clusterComponents(layout);
   const layoutStrategy = detectLayoutStrategy(clustered.nodes);
 
@@ -348,12 +610,20 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
     layoutStrategy,
     semanticAnchors
   });
-  let report: any = { ...baseReport, tokens, semanticAnchors, implementationPlan };
+  const hierarchy = buildLayoutHierarchy(clustered.nodes);
+  let report: any = { ...baseReport, tokens, semanticAnchors, implementationPlan, hierarchy };
 
   // Semantic labeling
   if (options?.enableLabeling) {
     const labels = await labelNodes(normalizedPath, clustered.nodes);
     report = { ...report, semanticLabels: labels };
+  }
+
+  // Overlay annotations for LLM vision augmentation
+  if (options?.enableOverlay) {
+    const { buildOverlayAnnotations } = await import("@one-shot-ui/core/overlay");
+    const annotations = buildOverlayAnnotations(clustered.nodes, semanticAnchors, baseReport.spacing, baseReport.text);
+    report = { ...report, annotations };
   }
 
   return extractReportSchema.parse(report);
