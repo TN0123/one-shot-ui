@@ -1,66 +1,70 @@
 # one-shot-ui
 
-`one-shot-ui` is an open source CLI for AI agents to analyze screenshots, compare implementations against references, and iteratively reduce visual mismatch when recreating UIs.
+`one-shot-ui` is a Bun-based CLI and TypeScript workspace for deterministic UI extraction, screenshot comparison, scaffold generation, and agent-oriented iteration loops.
 
-The project is built around a simple principle:
+The core idea is simple:
 
-> large language models should not do first-pass measurement from raw pixels
+> let code extract structure and measurements first, then let an agent reason on top of that output
 
-Instead, `one-shot-ui` aims to extract deterministic, machine-readable UI data first, then let an agent reason on top of that data.
+Instead of asking a model to guess layout directly from raw pixels, the project turns screenshots into typed JSON, semantic anchors, implementation hints, and compare artifacts that are easier to automate against.
 
-## Status
+## Current State
 
-The repo now includes the roadmap work through Phase 6 in incremental form.
+As of March 2026, the Phase 6 surface is implemented and usable end-to-end for local experimentation.
 
-Implemented surfaces include:
+What exists today:
 
-- CLI scaffold
-- image loading and preprocessing
-- dominant color extraction
-- coarse layout box detection
-- spacing measurement between neighboring regions
-- border radius estimation for detected regions
-- OCR-driven font size and weight heuristics when OCR is enabled
-- simple component clustering for repeated visual patterns
-- Playwright screenshot capture
-- pixel diff and heatmap generation
-- actionable compare issues for position, size, spacing, color, radius, and text heuristics
-- typed JSON contracts
+- screenshot extraction with colors, layout regions, spacing, component clusters, hierarchy, and diagnostics
+- OCR-backed text extraction plus typography heuristics
 - semantic anchors and implementation planning output
-- region-focused compare with pixel-only fallback when semantic coverage is thin
-- a Phase 6 benchmark command and standing benchmark manifest
+- optional semantic labeling and overlay annotations for vision-assisted agent workflows
+- screenshot capture with Playwright
+- screenshot compare with heatmaps, grouped structural issues, and top edit candidates
+- region-scoped compare with semantic-coverage fallback to pixel-only guidance
+- DOM-aware comparison against a local file or live URL
+- scaffold generation to HTML/CSS, plus optional React component output
+- multi-pass `run` orchestration that writes session and next-action artifacts
+- benchmark manifests and benchmark scoring for regression tracking
 
-Roadmap details are in roadmap.md.
+Current work is less about adding brand new commands and more about improving fidelity and reliability:
 
-## Goals
+- scaffold output still needs better first-pass resemblance on real screenshots
+- compare output is useful, but still being tuned toward higher-leverage edit guidance
+- extraction and schema handling are being hardened through dogfooding on real references
+- benchmark coverage is still lightweight and intended for trend tracking, not ground truth
 
-The long-term goal is to help agents answer questions like:
+## CLI Surface
 
-- what exact colors are present in a screenshot?
-- what layout regions and reusable components exist?
-- how does an implementation differ from the reference?
-- what exact fixes should be made to reduce the mismatch?
-
-## Current CLI
-
-The current CLI exposes these commands:
+The CLI currently exposes:
 
 ```sh
-bun packages/cli/src/index.ts extract <imagePath> --json
-bun packages/cli/src/index.ts compare <referencePath> <implementationPath> --json --heatmap <path>
+bun packages/cli/src/index.ts extract <imagePath> [--json] [--label] [--overlay] [--fine]
+bun packages/cli/src/index.ts plan <imagePath> [--json]
+bun packages/cli/src/index.ts tokens <imagePath> [--json]
+bun packages/cli/src/index.ts scaffold <imagePath> [--output <dir>] [--react] [--mode structured|absolute]
 bun packages/cli/src/index.ts capture --file <htmlPath> --output <pngPath>
-bun packages/cli/src/index.ts plan <imagePath> --json
-bun packages/cli/src/index.ts tokens <imagePath> --json
-bun packages/cli/src/index.ts suggest-fixes <referencePath> <implementationPath> --json
-bun packages/cli/src/index.ts benchmark benchmarks/phase6-manifest.json --json
+bun packages/cli/src/index.ts compare <referencePath> <implementationPath> [--json] [--heatmap <path>] [--region <anchor>] [--crop x,y,width,height] [--dom-diff <url-or-file>]
+bun packages/cli/src/index.ts suggest-fixes <referencePath> <implementationPath> [--json] [--region <anchor>] [--dom-diff <url-or-file>]
+bun packages/cli/src/index.ts run <referencePath> --impl <html-or-url> [--output <dir>] [--max-passes <n>]
+bun packages/cli/src/index.ts benchmark <manifestPath> [--json] [--output <path>]
 ```
 
-## Getting started
+Root scripts are available for the most common commands:
+
+```sh
+bun run extract
+bun run compare
+bun run capture
+bun run benchmark
+```
+
+## Getting Started
 
 Requirements:
 
 - Bun
-- macOS, Linux, or another environment supported by `sharp` and Playwright
+- an environment supported by `sharp`
+- Playwright Chromium for screenshot capture and DOM extraction
 
 Install dependencies:
 
@@ -68,7 +72,7 @@ Install dependencies:
 bun install
 ```
 
-Install the Playwright Chromium binary used by `capture`:
+Install the browser used by `capture` and DOM diff:
 
 ```sh
 bun run install:browsers
@@ -80,42 +84,98 @@ Typecheck the workspace:
 bun run typecheck
 ```
 
-## Example workflow
+Show CLI help:
 
-1. Capture or save a reference screenshot.
-2. Run `extract` on the reference image.
-3. Build the implementation in HTML/CSS or your target framework.
-4. Run `capture` on the implementation.
-5. Run `compare` between the reference and implementation.
-6. Use the heatmap and JSON report to make fixes.
-7. Repeat until the mismatch is low enough.
-
-## Repository layout
-
-```text
-packages/
-  browser-capture/  Playwright-based screenshot capture
-  cli/              command-line entrypoint
-  core/             shared schemas and contracts
-  diff-engine/      image compare and heatmap generation
-  image-io/         image loading and preprocessing helpers
-  vision-components/ repeated-pattern clustering
-  vision-layout/    coarse layout box detection
-  vision-style/     dominant color extraction
-  vision-text/      OCR adapter
-testing/            static testing fixture and outputs
+```sh
+bun packages/cli/src/index.ts --help
 ```
 
-## Notes on the current phase
+## Typical Workflows
 
-- OCR is currently opt-in via `ONE_SHOT_UI_ENABLE_OCR=1`.
-- Layout detection is still intentionally coarse and region-oriented rather than a full semantic tree.
-- Border radius, spacing, typography, and component outputs are deterministic heuristics, not model-backed vision.
-- `compare --region` now reports when it must fall back to scoped pixel-only output because semantic coverage is too thin.
-- Benchmark scoring is intentionally lightweight; it is meant to track regressions over time rather than claim ground-truth semantic accuracy.
+### Extract and plan from a screenshot
 
-See [roadmap.md](/Users/tanaynaik/Desktop/one-shot-ui/roadmap.md), [docs/benchmarking.md](/Users/tanaynaik/Desktop/one-shot-ui/docs/benchmarking.md), and [docs/agent-integration.md](/Users/tanaynaik/Desktop/one-shot-ui/docs/agent-integration.md).
+```sh
+bun packages/cli/src/index.ts extract ./reference.png --json
+bun packages/cli/src/index.ts plan ./reference.png --json
+bun packages/cli/src/index.ts tokens ./reference.png --json
+```
+
+### Generate a first scaffold
+
+```sh
+bun packages/cli/src/index.ts scaffold ./reference.png --output ./scaffold
+bun packages/cli/src/index.ts scaffold ./reference.png --output ./scaffold-react --react
+```
+
+### Capture and compare an implementation
+
+```sh
+bun packages/cli/src/index.ts capture --file ./scaffold/index.html --output ./impl.png
+bun packages/cli/src/index.ts compare ./reference.png ./impl.png --json --heatmap ./heatmap.png
+```
+
+### Focus on one section
+
+```sh
+bun packages/cli/src/index.ts compare ./reference.png ./impl.png --json --region "main-content"
+```
+
+### Get edit guidance
+
+```sh
+bun packages/cli/src/index.ts suggest-fixes ./reference.png ./impl.png --json
+```
+
+### Run the orchestration loop
+
+```sh
+bun packages/cli/src/index.ts run ./reference.png --impl ./scaffold/index.html --output ./one-shot-run
+```
+
+### Run benchmarks
+
+```sh
+bun packages/cli/src/index.ts benchmark ./benchmarks/phase6-manifest.json --json
+```
+
+Note: benchmark manifests are in-repo, but many fixture images and local reconstruction files used during dogfooding live in ignored local `testing/` directories.
+
+## Important Notes
+
+- OCR is enabled by default unless disabled with `--no-ocr` or `ONE_SHOT_UI_DISABLE_OCR=1`.
+- Layout detection is still heuristic and region-oriented, not a full semantic DOM reconstruction.
+- Typography, spacing, radius, shadow, and gradient outputs are deterministic estimates, not model-based vision outputs.
+- `extract --label` uses heuristic semantic labels unless you provide a custom labeling adapter.
+- `extract --overlay` adds structured measurement annotations intended to complement an LLM's own vision.
+- `compare --region` can explicitly fall back to scoped pixel guidance when semantic coverage is too thin.
+- `run` produces artifacts for downstream editing agents, but it does not directly edit the implementation itself.
+
+## Repository Layout
+
+```text
+benchmarks/          benchmark manifests and checklist docs
+docs/                workflow notes for agents and benchmarking
+packages/
+  browser-capture/   Playwright screenshot capture
+  cli/               command-line entrypoint
+  core/              shared schemas, plans, tokens, overlays, scaffold generation
+  diff-engine/       compare engine, heatmaps, issue generation
+  dom-diff/          DOM extraction and DOM-vs-reference comparison
+  image-io/          image loading and preprocessing
+  semantic-label/    heuristic or adapter-backed semantic labels
+  vision-components/ repeated-pattern clustering
+  vision-layout/     layout detection and spacing measurement
+  vision-style/      colors, gradients, shadows, radius heuristics
+  vision-text/       OCR and typography heuristics
+```
+
+## Project Docs
+
+- `docs/agent-integration.md`: suggested agent loop and prompt templates
+- `docs/benchmarking.md`: benchmark command and current scoring dimensions
+- `benchmarks/DOGFOOD-CHECKLIST.md`: end-to-end workflow checklist
+- `cli-improvement-plan.md`: current reliability and fidelity workstreams
 
 ## License
 
-This project is licensed under the MIT License.
+MIT
