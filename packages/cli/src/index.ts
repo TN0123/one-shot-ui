@@ -116,6 +116,16 @@ program
         console.log(`  fix: ${issue.suggestedFix}`);
       }
     }
+    if (report.topEditCandidates?.length) {
+      console.log(`\nTop edit candidates:`);
+      for (const candidate of report.topEditCandidates) {
+        const selector = candidate.cssSelector ? ` (${candidate.cssSelector})` : "";
+        console.log(`  ${candidate.rank}. [${candidate.estimatedImpact}]${selector} ${candidate.description}`);
+        for (const css of candidate.cssChanges) {
+          console.log(`     ${css}`);
+        }
+      }
+    }
     if (report.artifacts.heatmapPath) {
       console.log(`Heatmap: ${report.artifacts.heatmapPath}`);
     }
@@ -184,6 +194,7 @@ program
   .option("--react", "Generate React component hierarchy", false)
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--output <dir>", "Directory to write scaffold files")
+  .option("--mode <mode>", "Scaffold layout mode: absolute or structured", "structured")
   .action(async (imagePath, options) => {
     const report = await extractImageReport(imagePath, {
       disableOcr: options.ocr === false
@@ -196,7 +207,8 @@ program
       report.semanticAnchors ?? [],
       report.tokens ?? [],
       report.layout,
-      report.text
+      report.text,
+      options.mode ?? "structured"
     );
 
     if (options.react) {
@@ -391,11 +403,20 @@ program
         "utf8"
       );
 
+      // Write next-actions artifact for this pass
+      const nextActions = buildNextActions(compareReport, passNumber);
+      await writeFile(
+        resolve(outputDir, `pass-${passNumber}-next-actions.json`),
+        JSON.stringify(nextActions, null, 2),
+        "utf8"
+      );
+
       console.log(`  Heatmap: ${heatmapPath}`);
       console.log();
     }
 
     // Write session log
+    const convergenceSummary = buildConvergenceSummary(sessionLog, threshold);
     const sessionReport = {
       version: VERSION,
       reference: resolve(referencePath),
@@ -404,6 +425,7 @@ program
       finalMismatchRatio: currentMismatchRatio,
       converged: currentMismatchRatio <= threshold,
       threshold,
+      convergenceSummary,
       log: sessionLog
     };
 
@@ -420,6 +442,10 @@ program
       console.log(`  Passes: ${passNumber}`);
       console.log(`  Final mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
       console.log(`  Converged: ${currentMismatchRatio <= threshold ? "yes" : "no"}`);
+      console.log(`  Trend: ${convergenceSummary.trend}`);
+      if (convergenceSummary.message) {
+        console.log(`  ${convergenceSummary.message}`);
+      }
       console.log(`  Session log: ${resolve(outputDir, "session.json")}`);
     }
   });
@@ -1022,4 +1048,145 @@ function average(values: number[]): number | null {
     return null;
   }
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function buildNextActions(compareReport: any, passNumber: number) {
+  const issues = compareReport.issues ?? [];
+  const topEditCandidates = compareReport.topEditCandidates ?? [];
+
+  // Build machine-readable patches/suggestions
+  const patches: Array<{
+    priority: number;
+    anchorName?: string;
+    cssSelector?: string;
+    action: string;
+    cssProperties: Record<string, string>;
+    issueCode: string;
+  }> = [];
+
+  for (const [idx, issue] of issues.entries()) {
+    if (idx >= 10) break; // Cap at 10 patches per pass
+
+    const patch: typeof patches[number] = {
+      priority: idx + 1,
+      anchorName: issue.anchorName,
+      cssSelector: issue.cssSelector ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined),
+      action: describeAction(issue.code),
+      cssProperties: extractCssProperties(issue),
+      issueCode: issue.code
+    };
+    patches.push(patch);
+  }
+
+  return {
+    version: VERSION,
+    pass: passNumber,
+    mismatchRatio: compareReport.summary?.mismatchRatio ?? 0,
+    patchCount: patches.length,
+    patches,
+    topEditCandidates: topEditCandidates.slice(0, 5)
+  };
+}
+
+function describeAction(code: string): string {
+  switch (code) {
+    case "POSITION_MISMATCH": return "adjust-position";
+    case "SIZE_MISMATCH": return "adjust-size";
+    case "COLOR_MISMATCH": return "change-color";
+    case "BORDER_RADIUS_MISMATCH": return "adjust-border-radius";
+    case "SHADOW_MISMATCH": return "adjust-shadow";
+    case "GRADIENT_MISMATCH": return "adjust-gradient";
+    case "SPACING_MISMATCH": return "adjust-spacing";
+    case "FONT_SIZE_MISMATCH": return "adjust-font-size";
+    case "FONT_WEIGHT_MISMATCH": return "adjust-font-weight";
+    case "FONT_FAMILY_MISMATCH": return "change-font-family";
+    case "MISSING_NODE": return "add-element";
+    case "EXTRA_NODE": return "remove-element";
+    case "DIMENSION_MISMATCH": return "resize-canvas";
+    default: return "fix";
+  }
+}
+
+function extractCssProperties(issue: any): Record<string, string> {
+  const props: Record<string, string> = {};
+  const ref = issue.reference;
+
+  switch (issue.code) {
+    case "POSITION_MISMATCH":
+      if (ref?.x != null) props["left"] = `${ref.x}px`;
+      if (ref?.y != null) props["top"] = `${ref.y}px`;
+      break;
+    case "SIZE_MISMATCH":
+      if (ref?.width != null) props["width"] = `${ref.width}px`;
+      if (ref?.height != null) props["height"] = `${ref.height}px`;
+      break;
+    case "COLOR_MISMATCH":
+      if (ref?.fill) props["background-color"] = ref.fill;
+      break;
+    case "BORDER_RADIUS_MISMATCH":
+      if (ref?.borderRadius != null) props["border-radius"] = `${ref.borderRadius}px`;
+      break;
+    case "SHADOW_MISMATCH":
+      if (ref?.shadow) {
+        const s = ref.shadow;
+        props["box-shadow"] = `${s.xOffset}px ${s.yOffset}px ${s.blurRadius}px ${s.spread}px ${s.color}`;
+      } else {
+        props["box-shadow"] = "none";
+      }
+      break;
+    case "FONT_SIZE_MISMATCH":
+      if (ref?.fontSize) props["font-size"] = `${ref.fontSize}px`;
+      break;
+    case "FONT_WEIGHT_MISMATCH":
+      if (ref?.fontWeight) props["font-weight"] = `${ref.fontWeight}`;
+      break;
+    case "SPACING_MISMATCH":
+      if (ref?.distance != null) props["gap"] = `${ref.distance}px`;
+      break;
+  }
+
+  return props;
+}
+
+function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
+  const comparePasses = log.filter(e => e.phase === "compare" && e.result?.mismatchRatio != null);
+  const ratios = comparePasses.map(e => e.result.mismatchRatio as number);
+
+  if (ratios.length < 2) {
+    return {
+      trend: "insufficient-data" as const,
+      improvementRate: 0,
+      stalled: false,
+      message: ratios.length === 0
+        ? "No comparison data available."
+        : `Only one pass completed. Mismatch: ${(ratios[0]! * 100).toFixed(2)}%.`
+    };
+  }
+
+  const firstRatio = ratios[0]!;
+  const lastRatio = ratios[ratios.length - 1]!;
+  const totalImprovement = firstRatio - lastRatio;
+  const improvementRate = totalImprovement / firstRatio;
+
+  // Check if stalled (last two passes within 0.5% of each other)
+  const lastTwo = ratios.slice(-2);
+  const stalled = Math.abs(lastTwo[0]! - lastTwo[1]!) < 0.005;
+
+  const trend = lastRatio <= threshold ? "converged" :
+    stalled ? "stalled" :
+    totalImprovement > 0 ? "improving" : "regressing";
+
+  return {
+    trend,
+    improvementRate: Math.round(improvementRate * 100) / 100,
+    stalled,
+    ratioHistory: ratios,
+    message: trend === "converged"
+      ? `Converged at ${(lastRatio * 100).toFixed(2)}% mismatch after ${ratios.length} passes.`
+      : trend === "stalled"
+      ? `Progress stalled at ${(lastRatio * 100).toFixed(2)}% mismatch. Consider a different approach for remaining issues.`
+      : trend === "improving"
+      ? `Improving: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}% (${(improvementRate * 100).toFixed(0)}% improvement).`
+      : `Regression detected: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}%.`
+  };
 }

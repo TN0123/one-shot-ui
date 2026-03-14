@@ -300,6 +300,24 @@ export const compareReportSchema = z.object({
     }).optional()
   }),
   issues: z.array(compareIssueSchema),
+  groupedIssues: z.array(z.object({
+    groupName: z.string(),
+    anchorName: z.string().optional(),
+    cssSelector: z.string().optional(),
+    severity: z.enum(["low", "medium", "high"]),
+    issueCount: z.number().int().nonnegative(),
+    summary: z.string(),
+    suggestedFixes: z.array(z.string()),
+    memberIssueCodes: z.array(z.string())
+  })).optional(),
+  topEditCandidates: z.array(z.object({
+    rank: z.number().int().positive(),
+    anchorName: z.string().optional(),
+    cssSelector: z.string().optional(),
+    description: z.string(),
+    cssChanges: z.array(z.string()),
+    estimatedImpact: z.enum(["low", "medium", "high"])
+  })).optional(),
   artifacts: z.object({
     heatmapPath: z.string().nullable(),
     regionHeatmaps: z.array(z.object({
@@ -437,6 +455,8 @@ export type BenchmarkManifest = z.infer<typeof benchmarkManifestSchema>;
 export type BenchmarkRegionResult = z.infer<typeof benchmarkRegionResultSchema>;
 export type BenchmarkCaseResult = z.infer<typeof benchmarkCaseResultSchema>;
 export type BenchmarkSuiteReport = z.infer<typeof benchmarkSuiteReportSchema>;
+export type IssueGroup = z.infer<typeof compareReportSchema>["groupedIssues"];
+export type TopEditCandidate = z.infer<typeof compareReportSchema>["topEditCandidates"];
 export type OverlayAnnotation = {
   nodeId: string;
   label: string;
@@ -628,6 +648,12 @@ function classifyPanel(
   } else if (relW > 0.4 && relH < 0.25) {
     // Wide but short strip → banner/bar
     name = "banner"; role = "banner";
+  } else if (relW > 0.15 && relW < 0.35 && relH > 0.08 && relH < 0.25) {
+    // Moderate card-sized panel → stat card
+    name = "stat-card"; role = "stat-card";
+  } else if (relW > 0.3 && relH > 0.2 && relH < 0.5 && relY > 0.1) {
+    // Landscape region in body → chart panel
+    name = "chart-panel"; role = "chart";
   } else {
     // Generic section
     name = "section"; role = "section";
@@ -734,6 +760,12 @@ function inferChildRole(
   if (aspectRatio > 3 && relW > 0.5) return "row";
   // Tall and narrow → column
   if (aspectRatio < 0.3 && relH > 0.4) return "column";
+  // Small circle-like element → avatar/profile image
+  if (relW < 0.12 && relH < 0.08 && Math.abs(aspectRatio - 1) < 0.3 && node.borderRadius && node.borderRadius > 0) return "avatar";
+  // Wide landscape child → chart or data visualization
+  if (aspectRatio > 2 && relW > 0.6 && relH > 0.15 && relH < 0.6) return "chart";
+  // Small and narrow → badge or label
+  if (relW < 0.2 && relH < 0.05) return "badge";
 
   return "item";
 }
@@ -751,6 +783,15 @@ function inferNodeStrategy(anchor: SemanticAnchor, layoutStrategy?: LayoutStrate
   if (layoutStrategy?.type === "grid" || layoutStrategy?.type === "flex" || layoutStrategy?.type === "absolute") {
     return layoutStrategy.type;
   }
+  if (anchor.role === "stat-card" || anchor.role === "badge") {
+    return "flex";
+  }
+  if (anchor.role === "chart") {
+    return "stack";
+  }
+  if (anchor.role === "avatar") {
+    return "flex";
+  }
   return "unknown";
 }
 
@@ -765,6 +806,24 @@ function inferRepeatedPatterns(anchors: SemanticAnchor[]): string[] {
       results.push(`repeated ${role} elements (${count} instances) with shared styling`);
     }
   }
+
+  // Detect card families by similar bounds dimensions
+  const sizeSignatures = new Map<string, { count: number; role: string }>();
+  for (const anchor of anchors) {
+    if (anchor.parentId === null) continue; // Skip top-level panels
+    const wBucket = Math.round(anchor.bounds.width / 20) * 20;
+    const hBucket = Math.round(anchor.bounds.height / 20) * 20;
+    const key = `${wBucket}x${hBucket}`;
+    const entry = sizeSignatures.get(key) ?? { count: 0, role: anchor.role };
+    entry.count++;
+    sizeSignatures.set(key, entry);
+  }
+  for (const [size, entry] of sizeSignatures) {
+    if (entry.count >= 3) {
+      results.push(`repeated ${entry.role} cards (~${size}px) — ${entry.count} instances with shared dimensions, likely a card grid`);
+    }
+  }
+
   return results;
 }
 
@@ -782,6 +841,18 @@ function inferCssPrimitives(layoutStrategy: LayoutStrategy | undefined, anchors:
   }
   if (anchors.some((anchor) => anchor.role === "row")) {
     primitives.add("Stacked flex rows for list or card layouts");
+  }
+  if (anchors.some((anchor) => anchor.role === "stat-card")) {
+    primitives.add("Repeated stat cards with consistent sizing, likely displayed in a row or grid");
+  }
+  if (anchors.some((anchor) => anchor.role === "chart")) {
+    primitives.add("Chart container — use a fixed-height div with placeholder or chart library integration");
+  }
+  if (anchors.some((anchor) => anchor.role === "avatar")) {
+    primitives.add("Avatar elements — use border-radius: 50% with overflow: hidden for circular profiles");
+  }
+  if (anchors.some((anchor) => anchor.role === "badge")) {
+    primitives.add("Badge/label elements — small inline-flex containers with padding and border-radius");
   }
   return [...primitives];
 }

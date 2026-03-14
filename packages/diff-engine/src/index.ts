@@ -287,6 +287,9 @@ export async function compareImages(
   // Noise reduction: filter low-confidence issues and cap the list
   const filteredIssues = applyNoiseReduction(sortIssues(issues), confidenceThreshold, top);
 
+  const groupedIssues = groupIssuesBySection(filteredIssues, referenceAnchors);
+  const topEditCandidates = buildTopEditCandidates(filteredIssues, referenceAnchors);
+
   return compareReportSchema.parse({
     version: VERSION,
     referenceImage,
@@ -300,6 +303,8 @@ export async function compareImages(
       focus: focusDiagnostics
     },
     issues: filteredIssues,
+    groupedIssues,
+    topEditCandidates,
     artifacts: {
       heatmapPath: normalizedHeatmapPath,
       regionHeatmaps: regionHeatmaps.length > 0 ? regionHeatmaps : undefined
@@ -1030,5 +1035,120 @@ function sortIssues(issues: CompareIssue[]) {
       return severityDelta;
     }
     return a.code.localeCompare(b.code);
+  });
+}
+
+function groupIssuesBySection(issues: CompareIssue[], anchors: SemanticAnchor[]): Array<{
+  groupName: string;
+  anchorName?: string;
+  cssSelector?: string;
+  severity: "low" | "medium" | "high";
+  issueCount: number;
+  summary: string;
+  suggestedFixes: string[];
+  memberIssueCodes: string[];
+}> {
+  // Group issues by their anchor name (section), or by issue code if no anchor
+  const groups = new Map<string, CompareIssue[]>();
+
+  for (const issue of issues) {
+    const key = issue.anchorName ?? issue.code;
+    const list = groups.get(key) ?? [];
+    list.push(issue);
+    groups.set(key, list);
+  }
+
+  const result: Array<{
+    groupName: string;
+    anchorName?: string;
+    cssSelector?: string;
+    severity: "low" | "medium" | "high";
+    issueCount: number;
+    summary: string;
+    suggestedFixes: string[];
+    memberIssueCodes: string[];
+  }> = [];
+
+  for (const [key, groupIssues] of groups) {
+    if (groupIssues.length < 2) continue; // Only group when there are multiple related issues
+
+    const severityOrder = { high: 0, medium: 1, low: 2 };
+    const worstSeverity = groupIssues.reduce((worst, issue) =>
+      severityOrder[issue.severity] < severityOrder[worst] ? issue.severity : worst,
+      "low" as "low" | "medium" | "high"
+    );
+
+    const anchor = anchors.find(a => a.name === key);
+    const selectorHint = anchor ? key.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : undefined;
+    const codes = [...new Set(groupIssues.map(i => i.code))];
+    const fixes = groupIssues
+      .filter(i => i.suggestedFix)
+      .map(i => i.suggestedFix!)
+      .slice(0, 5);
+
+    const codeDescriptions = codes.map(c => {
+      const count = groupIssues.filter(i => i.code === c).length;
+      return `${count} ${c.toLowerCase().replace(/_/g, " ")} issue${count > 1 ? "s" : ""}`;
+    });
+
+    result.push({
+      groupName: anchor ? `Section: ${key}` : `Issue type: ${key.toLowerCase().replace(/_/g, " ")}`,
+      anchorName: anchor?.name,
+      cssSelector: selectorHint ? `.${selectorHint}` : groupIssues[0]?.cssSelector,
+      severity: worstSeverity,
+      issueCount: groupIssues.length,
+      summary: `${groupIssues.length} issues: ${codeDescriptions.join(", ")}`,
+      suggestedFixes: fixes,
+      memberIssueCodes: codes
+    });
+  }
+
+  // Sort by severity then issue count
+  return result.sort((a, b) => {
+    const sev = { high: 0, medium: 1, low: 2 };
+    const sevDelta = sev[a.severity] - sev[b.severity];
+    if (sevDelta !== 0) return sevDelta;
+    return b.issueCount - a.issueCount;
+  });
+}
+
+function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[]): Array<{
+  rank: number;
+  anchorName?: string;
+  cssSelector?: string;
+  description: string;
+  cssChanges: string[];
+  estimatedImpact: "low" | "medium" | "high";
+}> {
+  // Score each issue by visual weight and severity, pick top 5
+  const scored = issues
+    .filter(i => i.suggestedFix)
+    .map(i => {
+      const severityScore = i.severity === "high" ? 3 : i.severity === "medium" ? 2 : 1;
+      const vwScore = (i.visualWeight ?? 0.1) * 10;
+      return { issue: i, score: severityScore + vwScore };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  return scored.map((entry, idx) => {
+    const i = entry.issue;
+    const anchor = i.anchorName ? anchors.find(a => a.name === i.anchorName) : undefined;
+    const selectorHint = anchor
+      ? `.${anchor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+      : i.cssSelector;
+
+    const cssChanges: string[] = [];
+    if (i.suggestedFix) cssChanges.push(i.suggestedFix);
+    if (i.cssProperty) cssChanges.push(`${i.cssProperty}: /* see fix */`);
+
+    return {
+      rank: idx + 1,
+      anchorName: i.anchorName,
+      cssSelector: selectorHint,
+      description: i.message,
+      cssChanges,
+      estimatedImpact: i.severity
+    };
   });
 }

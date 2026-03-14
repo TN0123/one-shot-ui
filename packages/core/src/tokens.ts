@@ -190,11 +190,9 @@ function quantize(value: number, step: number): number {
 }
 
 function hexDistance(a: string, b: string): number {
-  const ar = Number.parseInt(a.replace("#", "").slice(0, 2), 16);
-  const ag = Number.parseInt(a.replace("#", "").slice(2, 4), 16);
-  const ab = Number.parseInt(a.replace("#", "").slice(4, 6), 16);
-  const br = Number.parseInt(b.replace("#", "").slice(0, 2), 16);
-  const bg = Number.parseInt(b.replace("#", "").slice(2, 4), 16);
-  const bb = Number.parseInt(b.replace("#", "").slice(4, 6), 16);
-  return Math.abs(ar - br) + Math.abs(ag - bg) + Math.abs(ab - bb);
+  const parse = (hex: string, start: number) => {
+    const val = Number.parseInt(hex.replace("#", "").slice(start, start + 2), 16);
+    return Number.isFinite(val) ? Math.max(0, Math.min(255, val)) : 0;
+  };
+  return Math.abs(parse(a, 0) - parse(b, 0)) + Math.abs(parse(a, 2) - parse(b, 2)) + Math.abs(parse(a, 4) - parse(b, 4));
 }

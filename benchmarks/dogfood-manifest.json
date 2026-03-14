@@ -1,0 +1,16 @@
+{
+  "version": "0.4.0",
+  "cases": [
+    {
+      "id": "online-dashboard",
+      "name": "Public Dashboard Screenshot",
+      "referencePath": "../testing/reference-online.png",
+      "implementationPath": "../testing/index.html",
+      "tags": ["dashboard", "bright", "multi-panel"],
+      "regions": [
+        { "name": "left-sidebar", "maxMismatchRatio": 0.15 },
+        { "name": "main-content", "maxMismatchRatio": 0.20 }
+      ]
+    }
+  ]
+}

@@ -51,7 +51,7 @@ export function extractDominantColors(image: ImageAsset, limit = 8): ColorSwatch
 }
 
 function quantize(value: number): number {
-  return Math.round(value / 16) * 16;
+  return Math.min(255, Math.max(0, Math.round(value / 16) * 16));
 }
 
 export function estimateNodeFill(image: ImageAsset, bounds: Bounds): string | null {

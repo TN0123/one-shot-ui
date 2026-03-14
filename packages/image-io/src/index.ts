@@ -130,19 +130,32 @@ export function rgbToHex(r: number, g: number, b: number): string {
   return `#${[r, g, b].map((value) => clampChannel(value).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
 
-function clampChannel(value: number): number {
+export function clampChannel(value: number): number {
   return Math.max(0, Math.min(255, Math.round(value)));
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
+export function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const normalized = hex.replace("#", "");
   return {
-    r: Number.parseInt(normalized.slice(0, 2), 16),
-    g: Number.parseInt(normalized.slice(2, 4), 16),
-    b: Number.parseInt(normalized.slice(4, 6), 16)
+    r: clampChannel(Number.parseInt(normalized.slice(0, 2), 16) || 0),
+    g: clampChannel(Number.parseInt(normalized.slice(2, 4), 16) || 0),
+    b: clampChannel(Number.parseInt(normalized.slice(4, 6), 16) || 0)
   };
 }
 
-function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
+export function normalizeHex(hex: string): string {
+  const match = hex.match(/^#?([0-9a-fA-F]{6})$/);
+  if (!match) {
+    // Attempt recovery: clamp any rgb-like hex
+    const raw = hex.replace("#", "").slice(0, 6).padEnd(6, "0");
+    const r = clampChannel(Number.parseInt(raw.slice(0, 2), 16) || 0);
+    const g = clampChannel(Number.parseInt(raw.slice(2, 4), 16) || 0);
+    const b = clampChannel(Number.parseInt(raw.slice(4, 6), 16) || 0);
+    return rgbToHex(r, g, b);
+  }
+  return `#${match[1]!.toUpperCase()}`;
+}
+
+export function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
   return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
 }
