@@ -1,18 +1,48 @@
 {
   "name": "one-shot-ui",
-  "private": true,
+  "version": "0.4.0",
+  "description": "Deterministic UI extraction, diffing, and scaffolding from screenshots",
   "type": "module",
   "packageManager": "bun@1.3.2",
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "one-shot-ui": "dist/cli.mjs"
+  },
+  "files": [
+    "dist/",
+    "AGENTS.md",
+    "skill/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ui",
+    "screenshot",
+    "extract",
+    "diff",
+    "scaffold",
+    "design-to-code",
+    "cli",
+    "agent",
+    "vision"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TN0123/one-shot-ui.git"
+  },
   "scripts": {
+    "build": "bun scripts/build.ts",
+    "prepublishOnly": "bun run build",
     "install:browsers": "playwright install chromium",
     "typecheck": "tsc --noEmit",
-    "extract": "bun packages/cli/src/index.ts extract",
-    "compare": "bun packages/cli/src/index.ts compare",
-    "capture": "bun packages/cli/src/index.ts capture",
-    "benchmark": "bun packages/cli/src/index.ts benchmark"
+    "dev:extract": "bun packages/cli/src/index.ts extract",
+    "dev:compare": "bun packages/cli/src/index.ts compare",
+    "dev:capture": "bun packages/cli/src/index.ts capture",
+    "dev:benchmark": "bun packages/cli/src/index.ts benchmark"
   },
   "dependencies": {
     "commander": "^14.0.1",

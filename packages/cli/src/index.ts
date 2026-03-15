@@ -1,7 +1,19 @@
 #!/usr/bin/env bun
 import { dirname, resolve } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execSync } from "node:child_process";
 import { Command } from "commander";
+
+function ensureChromium(): void {
+  try {
+    execSync("npx playwright install --dry-run chromium", { stdio: "ignore" });
+  } catch {
+    console.error(
+      "Chromium is not installed. Run:\n\n  npx playwright install chromium\n"
+    );
+    process.exit(1);
+  }
+}
 import {
   VERSION,
   benchmarkManifestSchema,
@@ -262,6 +274,7 @@ program
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--json", "Print session log as JSON", false)
   .action(async (referencePath, options) => {
+    ensureChromium();
     const outputDir = resolve(options.output);
     await mkdir(outputDir, { recursive: true });
 
@@ -558,6 +571,7 @@ program
   .option("--scale <scale>", "Device scale factor", "1")
   .option("--json", "Print full JSON report", false)
   .action(async (options) => {
+    ensureChromium();
     const outputPath = resolve(options.output);
     await mkdir(dirname(outputPath), { recursive: true });
 
