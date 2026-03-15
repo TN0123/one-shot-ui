@@ -1,6 +1,6 @@
 # Benchmarking
 
-Phase 6 introduces a first benchmark command:
+First benchmark command:
 
 ```sh
 bun packages/cli/src/index.ts benchmark benchmarks/phase6-manifest.json --json
