@@ -192,6 +192,23 @@ export async function compareImages(
       if (layoutMatches.some((match) => match.reference.id === node.id)) {
         continue;
       }
+      // Check if this node overlaps significantly with a matched implementation node
+      const overlapsMatched = layoutMatches.some((match) => {
+        const overlapW = Math.max(0,
+          Math.min(node.bounds.x + node.bounds.width, match.implementation.bounds.x + match.implementation.bounds.width) -
+          Math.max(node.bounds.x, match.implementation.bounds.x));
+        const overlapH = Math.max(0,
+          Math.min(node.bounds.y + node.bounds.height, match.implementation.bounds.y + match.implementation.bounds.height) -
+          Math.max(node.bounds.y, match.implementation.bounds.y));
+        const overlapArea = overlapW * overlapH;
+        const nodeArea = node.bounds.width * node.bounds.height;
+        return nodeArea > 0 && overlapArea / nodeArea > 0.6;
+      });
+
+      if (overlapsMatched) {
+        continue; // Skip — this node is mostly covered by an existing implementation node
+      }
+
       const anchor = resolveAnchor(referenceAnchors, node);
       const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
       issues.push({
@@ -417,6 +434,27 @@ function applyNoiseReduction(
     });
 
     filtered = [...nonExtraNodes, ...sortedExtra.slice(0, Math.max(5, nonExtraCount))];
+    filtered = sortIssues(filtered);
+  }
+
+  // Suppress small MISSING_NODE issues that are likely detection noise
+  const minMissingArea = 400; // 20x20 px minimum
+  filtered = filtered.filter((issue) => {
+    if (issue.code !== "MISSING_NODE") return true;
+    const ref = issue.reference as { bounds?: { width: number; height: number } } | undefined;
+    if (!ref?.bounds) return true;
+    return ref.bounds.width * ref.bounds.height >= minMissingArea;
+  });
+
+  // Suppress MISSING_NODE when the count exceeds structural nodes
+  const missingCount = filtered.filter((i) => i.code === "MISSING_NODE").length;
+  const structuralCodes = ["POSITION_MISMATCH", "SIZE_MISMATCH", "COLOR_MISMATCH", "BORDER_RADIUS_MISMATCH"];
+  const structuralCount = filtered.filter((i) => structuralCodes.includes(i.code)).length;
+  if (missingCount > structuralCount * 3 && missingCount > 5) {
+    const missing = filtered.filter((i) => i.code === "MISSING_NODE");
+    const nonMissing = filtered.filter((i) => i.code !== "MISSING_NODE");
+    const sortedMissing = missing.sort((a, b) => getIssueBoundsArea(b) - getIssueBoundsArea(a));
+    filtered = [...nonMissing, ...sortedMissing.slice(0, Math.max(3, structuralCount))];
     filtered = sortIssues(filtered);
   }
 
