@@ -811,6 +811,7 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
         const ref = issue.reference as { fill: string } | undefined;
         if (ref) {
           fix.css = `background-color: ${ref.fill};`;
+          fix.description = `${issue.message} Expected color: ${ref.fill}`;
         }
         break;
       }
@@ -1166,7 +1167,8 @@ function buildNextActions(compareReport: any, passNumber: number) {
     editCount: edits.length,
     edits,
     missingElements: missingNodes,
-    topEditCandidates: topEditCandidates.slice(0, 5)
+    topEditCandidates: topEditCandidates.slice(0, 5),
+    referenceColors: compareReport.referenceColors ?? []
   };
 }
 

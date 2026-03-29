@@ -15,7 +15,7 @@ import {
 import { detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
-import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill } from "@one-shot-ui/vision-style";
+import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
 import { segmentMismatch } from "./segmented-mismatch.js";
 
@@ -60,6 +60,7 @@ export async function compareImages(
   const refBg = detectBackgroundColor(referenceImage);
   const implBg = detectBackgroundColor(implementationImage);
   const fullReferenceLayout = clusterComponents(enrichLayoutNodes(referenceImage, detectLayoutBoxes(referenceImage), refBg)).nodes;
+  const referenceColors = extractDominantColors(referenceImage);
   const fullImplementationLayout = clusterComponents(enrichLayoutNodes(implementationImage, detectLayoutBoxes(implementationImage), implBg)).nodes;
   const referenceAnchors = buildSemanticAnchors(fullReferenceLayout, referenceText, {
     width: referenceImage.width,
@@ -317,6 +318,7 @@ export async function compareImages(
     issues: filteredIssues,
     groupedIssues,
     topEditCandidates,
+    referenceColors: referenceColors.slice(0, 8),
     artifacts: {
       heatmapPath: normalizedHeatmapPath,
       regionHeatmaps: regionHeatmaps.length > 0 ? regionHeatmaps : undefined
