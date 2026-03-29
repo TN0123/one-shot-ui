@@ -84,6 +84,7 @@ program
   .option("--region <anchorName>", "Compare only a named semantic anchor from the reference image")
   .option("--crop <x,y,width,height>", "Compare only a cropped rectangle")
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
+  .option("--summary", "Print a single human-readable summary line", false)
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       heatmapPath: options.heatmap,
@@ -112,6 +113,21 @@ program
       } catch (err) {
         console.error(`DOM diff failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+
+    if (options.summary) {
+      const ratio = (report.summary.mismatchRatio * 100).toFixed(1);
+      const dimStatus = report.issues.find(i => i.code === "DIMENSION_MISMATCH") ? "MISMATCH" : "OK";
+      const topIssues = report.issues
+        .filter(i => i.code !== "DIMENSION_MISMATCH" && i.code !== "PIXEL_DIFFERENCE")
+        .slice(0, 3)
+        .map(i => i.anchorName ?? i.code.toLowerCase().replace(/_/g, "-"))
+        .join(", ");
+      const segInfo = report.summary.segmented
+        ? ` | Structural: ${(report.summary.segmented.structuralMismatch * 100).toFixed(1)}%`
+        : "";
+      console.log(`Mismatch: ${ratio}% | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`);
+      return;
     }
 
     if (options.json) {
@@ -869,6 +885,29 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
     fixes.push(fix);
   }
 
+  // Pixel-region fallback: for issues with bounds but no CSS suggestion
+  for (const fix of fixes) {
+    if (fix.css) continue;
+
+    const issue = report.issues.find(
+      (i) => i.nodeId === fix.nodeId && i.code !== "PIXEL_DIFFERENCE" && i.code !== "DIMENSION_MISMATCH"
+    );
+    if (!issue) continue;
+
+    const ref = issue.reference as { bounds?: { x: number; y: number; width: number; height: number }; fill?: string; borderRadius?: number } | undefined;
+    if (!ref?.bounds) continue;
+
+    const cssLines: string[] = [];
+    cssLines.push(`/* Region at (${ref.bounds.x}, ${ref.bounds.y}) ${ref.bounds.width}x${ref.bounds.height} */`);
+    if (ref.fill) cssLines.push(`background-color: ${ref.fill};`);
+    cssLines.push(`width: ${ref.bounds.width}px;`);
+    cssLines.push(`height: ${ref.bounds.height}px;`);
+    if (ref.borderRadius) cssLines.push(`border-radius: ${ref.borderRadius}px;`);
+
+    fix.css = cssLines.join(" ");
+    fix.description = `${fix.description} (pixel-region fallback at ${ref.bounds.x},${ref.bounds.y})`;
+  }
+
   return fixes;
 }
 
@@ -1120,7 +1159,14 @@ function buildNextActions(compareReport: any, passNumber: number) {
 
   // Build complete CSS rule blocks that agents can copy-paste into stylesheets
   const edits = [...editMap.values()].map((edit, idx) => {
-    const propsBlock = Object.entries(edit.properties)
+    // Target-only properties for CSS rule blocks (agent copy-paste)
+    const targetProps: Record<string, string> = {};
+    for (const [prop, value] of Object.entries(edit.properties)) {
+      const arrowIdx = value.indexOf(" -> ");
+      targetProps[prop] = arrowIdx >= 0 ? value.slice(arrowIdx + 4) : value;
+    }
+
+    const propsBlock = Object.entries(targetProps)
       .map(([prop, value]) => `  ${prop}: ${value};`)
       .join("\n");
     return {
@@ -1129,7 +1175,8 @@ function buildNextActions(compareReport: any, passNumber: number) {
       anchorName: edit.anchorName,
       cssRuleBlock: `${edit.selector} {\n${propsBlock}\n}`,
       properties: edit.properties,
-      reasons: edit.reasons
+      targetProperties: targetProps,
+      reasons: edit.reasons,
     };
   });
 
@@ -1194,21 +1241,36 @@ function describeAction(code: string): string {
 function extractCssProperties(issue: any): Record<string, string> {
   const props: Record<string, string> = {};
   const ref = issue.reference;
+  const impl = issue.implementation;
 
   switch (issue.code) {
     case "POSITION_MISMATCH":
-      if (ref?.x != null) props["left"] = `${ref.x}px`;
-      if (ref?.y != null) props["top"] = `${ref.y}px`;
+      if (ref?.x != null) {
+        props["left"] = impl?.x != null ? `${impl.x}px -> ${ref.x}px` : `${ref.x}px`;
+      }
+      if (ref?.y != null) {
+        props["top"] = impl?.y != null ? `${impl.y}px -> ${ref.y}px` : `${ref.y}px`;
+      }
       break;
     case "SIZE_MISMATCH":
-      if (ref?.width != null) props["width"] = `${ref.width}px`;
-      if (ref?.height != null) props["height"] = `${ref.height}px`;
+      if (ref?.width != null) {
+        props["width"] = impl?.width != null ? `${impl.width}px -> ${ref.width}px` : `${ref.width}px`;
+      }
+      if (ref?.height != null) {
+        props["height"] = impl?.height != null ? `${impl.height}px -> ${ref.height}px` : `${ref.height}px`;
+      }
       break;
     case "COLOR_MISMATCH":
-      if (ref?.fill) props["background-color"] = ref.fill;
+      if (ref?.fill) {
+        props["background-color"] = impl?.fill ? `${impl.fill} -> ${ref.fill}` : ref.fill;
+      }
       break;
     case "BORDER_RADIUS_MISMATCH":
-      if (ref?.borderRadius != null) props["border-radius"] = `${ref.borderRadius}px`;
+      if (ref?.borderRadius != null) {
+        props["border-radius"] = impl?.borderRadius != null
+          ? `${impl.borderRadius}px -> ${ref.borderRadius}px`
+          : `${ref.borderRadius}px`;
+      }
       break;
     case "SHADOW_MISMATCH":
       if (ref?.shadow) {
@@ -1219,13 +1281,25 @@ function extractCssProperties(issue: any): Record<string, string> {
       }
       break;
     case "FONT_SIZE_MISMATCH":
-      if (ref?.fontSize) props["font-size"] = `${ref.fontSize}px`;
+      if (ref?.fontSize) {
+        props["font-size"] = impl?.fontSize
+          ? `${impl.fontSize}px -> ${ref.fontSize}px`
+          : `${ref.fontSize}px`;
+      }
       break;
     case "FONT_WEIGHT_MISMATCH":
-      if (ref?.fontWeight) props["font-weight"] = `${ref.fontWeight}`;
+      if (ref?.fontWeight) {
+        props["font-weight"] = impl?.fontWeight
+          ? `${impl.fontWeight} -> ${ref.fontWeight}`
+          : `${ref.fontWeight}`;
+      }
       break;
     case "SPACING_MISMATCH":
-      if (ref?.distance != null) props["gap"] = `${ref.distance}px`;
+      if (ref?.distance != null) {
+        props["gap"] = impl?.distance != null
+          ? `${impl.distance}px -> ${ref.distance}px`
+          : `${ref.distance}px`;
+      }
       break;
   }
 
