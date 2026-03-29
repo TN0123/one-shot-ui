@@ -7,3 +7,6 @@ bun.lock
 testing/
 .callcode/*
 .claude/*
+
+IMPROVEMENTS.md
+.bg-shell/*

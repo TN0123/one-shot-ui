@@ -38,6 +38,18 @@ export function samplePixel(image: ImageAsset, x: number, y: number): [number, n
   ];
 }
 
+/**
+ * Read only the width and height of an image without loading full pixel data.
+ * Useful for auto-detecting reference image dimensions for viewport matching.
+ */
+export async function readImageDimensions(imagePath: string): Promise<{ width: number; height: number }> {
+  const metadata = await sharp(imagePath).metadata();
+  if (!metadata.width || !metadata.height) {
+    throw new Error(`Unable to read image dimensions for ${imagePath}`);
+  }
+  return { width: metadata.width, height: metadata.height };
+}
+
 export function detectBackgroundColor(image: ImageAsset): string {
   const corners = [
     samplePixel(image, 0, 0),

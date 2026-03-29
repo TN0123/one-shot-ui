@@ -35,6 +35,9 @@ export interface ReactFileEntry {
 /**
  * Generate a complete, renderable HTML/CSS skeleton from the implementation plan.
  * Includes positioned containers with extracted colors, spacing tokens, and border-radius.
+ *
+ * When semantic anchor coverage is low, falls back to absolute-positioned divs
+ * generated directly from raw layout nodes so the scaffold is always usable.
  */
 export function generateHtmlScaffold(
   plan: ImplementationPlan,
@@ -45,14 +48,27 @@ export function generateHtmlScaffold(
   mode: ScaffoldMode = "structured"
 ): ScaffoldOutput {
   const cssVars = generateCssVariables(tokens);
-  const rootAnchors = anchors.filter(a => a.parentId === null);
+
+  // Detect if anchor coverage is too sparse to produce useful output.
+  // If real (non-synthetic) anchors cover less than 35% of total node area,
+  // fall back to absolute-positioned layout from raw nodes.
+  const useFallback = shouldUseFallback(anchors, nodes);
 
   let bodyContent = "";
-  for (const anchor of rootAnchors) {
-    bodyContent += generateHtmlNode(anchor, anchors, nodes, textBlocks, 2);
+  let css = "";
+
+  if (useFallback) {
+    const fallback = generateFallbackFromNodes(nodes, textBlocks, tokens);
+    bodyContent = fallback.html;
+    css = fallback.css;
+  } else {
+    const rootAnchors = anchors.filter(a => a.parentId === null);
+    for (const anchor of rootAnchors) {
+      bodyContent += generateHtmlNode(anchor, anchors, nodes, textBlocks, 2);
+    }
+    css = generateCssFromPlan(plan, anchors, nodes, tokens, mode);
   }
 
-  const css = generateCssFromPlan(plan, anchors, nodes, tokens, mode);
   const fullCss = `${cssVars}\n\n${css}`;
 
   const html = `<!DOCTYPE html>
@@ -72,6 +88,104 @@ ${bodyContent}  </div>
 </html>`;
 
   return { html, css: fullCss };
+}
+
+/**
+ * Determine whether anchor coverage is too low and we should fall back
+ * to generating absolute-positioned divs from raw layout nodes.
+ */
+function shouldUseFallback(anchors: SemanticAnchor[], nodes: LayoutNode[]): boolean {
+  if (nodes.length === 0) return false;
+  if (anchors.length === 0) return true;
+
+  // Count how many layout nodes are actually referenced by a non-synthetic anchor
+  const realAnchors = anchors.filter(a => a.nodeId !== null);
+  const anchoredNodeIds = new Set(realAnchors.map(a => a.nodeId));
+
+  // Calculate area coverage of anchored nodes vs total node area
+  const totalNodeArea = nodes.reduce((sum, n) => sum + n.bounds.width * n.bounds.height, 0);
+  const anchoredArea = nodes
+    .filter(n => anchoredNodeIds.has(n.id))
+    .reduce((sum, n) => sum + n.bounds.width * n.bounds.height, 0);
+
+  const coverage = totalNodeArea > 0 ? anchoredArea / totalNodeArea : 0;
+  return coverage < 0.35;
+}
+
+/**
+ * Generate absolute-positioned divs from raw layout nodes when semantic
+ * anchor coverage is too low for the structured scaffold to be useful.
+ * Produces correct colors, approximate positions, sizes, border-radius, and text.
+ */
+function generateFallbackFromNodes(
+  nodes: LayoutNode[],
+  textBlocks: TextBlock[],
+  tokens: DesignToken[]
+): { html: string; css: string } {
+  let html = "";
+  let css = `/* Fallback scaffold: absolute-positioned from raw layout nodes */\n`;
+
+  css += `.page {\n  position: relative;\n  width: 100%;\n  min-height: 100vh;\n  box-sizing: border-box;\n}\n\n`;
+
+  // Sort nodes by area (largest first) so bigger containers render behind smaller ones
+  const sorted = [...nodes].sort((a, b) => {
+    const areaA = a.bounds.width * a.bounds.height;
+    const areaB = b.bounds.width * b.bounds.height;
+    return areaB - areaA;
+  });
+
+  for (const node of sorted) {
+    const className = `node-${node.id}`;
+    const containedText = textBlocks.filter(tb => scaffoldBoundsContain(node.bounds, tb.bounds));
+
+    // HTML
+    let inner = "";
+    if (containedText.length > 0) {
+      for (const tb of containedText) {
+        const fontSize = tb.typography?.fontSize ?? 0;
+        const tag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
+        inner += `      <${tag}>${escapeHtml(tb.text)}</${tag}>\n`;
+      }
+    }
+
+    html += `    <div class="${className}" data-node="${node.id}">\n${inner}    </div>\n`;
+
+    // CSS
+    css += `.${className} {\n`;
+    css += `  position: absolute;\n`;
+    css += `  left: ${node.bounds.x}px;\n`;
+    css += `  top: ${node.bounds.y}px;\n`;
+    css += `  width: ${node.bounds.width}px;\n`;
+    css += `  height: ${node.bounds.height}px;\n`;
+
+    if (node.fill) {
+      const colorToken = tokens.find(t => t.type === "color" && String(t.value).toUpperCase() === node.fill?.toUpperCase());
+      css += `  background-color: ${colorToken ? `var(${colorToken.name})` : node.fill};\n`;
+    }
+
+    if (node.borderRadius && node.borderRadius > 0) {
+      const radiusToken = tokens.find(t => t.type === "radius" && t.value === `${node.borderRadius}px`);
+      css += `  border-radius: ${radiusToken ? `var(${radiusToken.name})` : `${node.borderRadius}px`};\n`;
+      css += `  overflow: hidden;\n`;
+    }
+
+    if (node.shadow) {
+      css += `  box-shadow: ${node.shadow.xOffset}px ${node.shadow.yOffset}px ${node.shadow.blurRadius}px ${node.shadow.spread}px ${node.shadow.color};\n`;
+    }
+
+    if (node.gradient) {
+      const stops = node.gradient.stops.map((s: any) => `${s.color} ${Math.round(s.position * 100)}%`).join(", ");
+      if (node.gradient.type === "linear") {
+        css += `  background: linear-gradient(${node.gradient.angle}deg, ${stops});\n`;
+      } else {
+        css += `  background: radial-gradient(${stops});\n`;
+      }
+    }
+
+    css += `}\n\n`;
+  }
+
+  return { html, css };
 }
 
 /**
@@ -141,7 +255,6 @@ function generateCssFromPlan(
 
   // Compute page bounds for relative sizing
   const pageWidth = Math.max(1, ...anchors.filter(a => a.parentId === null).map(a => a.bounds.x + a.bounds.width));
-  const pageHeight = Math.max(1, ...anchors.filter(a => a.parentId === null).map(a => a.bounds.y + a.bounds.height));
 
   // Page container
   css += `.page {\n`;
@@ -421,7 +534,7 @@ function generateReactFiles(
   tokens: DesignToken[],
   nodes: LayoutNode[],
   textBlocks: TextBlock[],
-  plan: ImplementationPlan
+  _plan: ImplementationPlan
 ): ReactFileEntry[] {
   const files: ReactFileEntry[] = [];
 

@@ -29,7 +29,7 @@ import {
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
 import { captureScreenshot } from "@one-shot-ui/browser-capture";
 import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
-import { calculateActivePixelRatio, detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
+import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
@@ -117,6 +117,15 @@ program
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
       return;
+    }
+
+    // Surface dimension warning prominently before other output
+    const dimIssue = report.issues.find(i => i.code === "DIMENSION_MISMATCH");
+    if (dimIssue) {
+      const ref = dimIssue.reference as { width: number; height: number } | undefined;
+      const impl = dimIssue.implementation as { width: number; height: number } | undefined;
+      console.log(`⚠ DIMENSION WARNING: Reference is ${ref?.width}x${ref?.height} but implementation is ${impl?.width}x${impl?.height}.`);
+      console.log(`  This inflates the mismatch ratio. Use --width ${ref?.width} --height ${ref?.height} with the capture command to match.\n`);
     }
 
     console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
@@ -282,9 +291,15 @@ program
     const threshold = Number.parseFloat(options.threshold);
     const sessionLog: SessionEntry[] = [];
 
+    // Auto-detect reference image dimensions for viewport matching
+    const refDimensions = await readImageDimensions(resolve(referencePath));
+    const captureWidth = refDimensions.width;
+    const captureHeight = refDimensions.height;
+
     console.log(`Starting multi-pass orchestration...`);
-    console.log(`Reference: ${referencePath}`);
+    console.log(`Reference: ${referencePath} (${captureWidth}x${captureHeight})`);
     console.log(`Implementation: ${options.impl}`);
+    console.log(`Capture viewport: ${captureWidth}x${captureHeight} (auto-matched to reference)`);
     console.log(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
     console.log();
 
@@ -320,8 +335,8 @@ program
           url: isFile ? undefined : options.impl,
           filePath: isFile ? resolve(options.impl) : undefined,
           outputPath: captureOutput,
-          width: 1440,
-          height: 1024,
+          width: captureWidth,
+          height: captureHeight,
           deviceScaleFactor: 1
         });
       } catch (err) {
@@ -424,6 +439,7 @@ program
         "utf8"
       );
 
+      console.log(`  ${nextActions.summary}`);
       console.log(`  Heatmap: ${heatmapPath}`);
       console.log();
     }
@@ -1067,37 +1083,89 @@ function average(values: number[]): number | null {
 function buildNextActions(compareReport: any, passNumber: number) {
   const issues = compareReport.issues ?? [];
   const topEditCandidates = compareReport.topEditCandidates ?? [];
+  const mismatchRatio = compareReport.summary?.mismatchRatio ?? 0;
 
-  // Build machine-readable patches/suggestions
-  const patches: Array<{
-    priority: number;
+  // Build structured, agent-applicable edits grouped by CSS selector
+  const editMap = new Map<string, {
+    selector: string;
     anchorName?: string;
-    cssSelector?: string;
-    action: string;
-    cssProperties: Record<string, string>;
-    issueCode: string;
-  }> = [];
+    properties: Record<string, string>;
+    reasons: string[];
+  }>();
 
   for (const [idx, issue] of issues.entries()) {
-    if (idx >= 10) break; // Cap at 10 patches per pass
+    if (idx >= 10) break;
 
-    const patch: typeof patches[number] = {
-      priority: idx + 1,
-      anchorName: issue.anchorName,
-      cssSelector: issue.cssSelector ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined),
-      action: describeAction(issue.code),
-      cssProperties: extractCssProperties(issue),
-      issueCode: issue.code
-    };
-    patches.push(patch);
+    const selector = issue.cssSelector
+      ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined);
+    if (!selector) continue;
+
+    const cssProps = extractCssProperties(issue);
+    if (Object.keys(cssProps).length === 0 && issue.code !== "MISSING_NODE") continue;
+
+    const existing = editMap.get(selector);
+    if (existing) {
+      Object.assign(existing.properties, cssProps);
+      existing.reasons.push(`${issue.code}: ${issue.message}`);
+    } else {
+      editMap.set(selector, {
+        selector,
+        anchorName: issue.anchorName,
+        properties: { ...cssProps },
+        reasons: [`${issue.code}: ${issue.message}`]
+      });
+    }
   }
+
+  // Build complete CSS rule blocks that agents can copy-paste into stylesheets
+  const edits = [...editMap.values()].map((edit, idx) => {
+    const propsBlock = Object.entries(edit.properties)
+      .map(([prop, value]) => `  ${prop}: ${value};`)
+      .join("\n");
+    return {
+      priority: idx + 1,
+      selector: edit.selector,
+      anchorName: edit.anchorName,
+      cssRuleBlock: `${edit.selector} {\n${propsBlock}\n}`,
+      properties: edit.properties,
+      reasons: edit.reasons
+    };
+  });
+
+  // One-line summary for agents
+  const topSelectors = edits.slice(0, 3).map(e => e.selector).join(", ");
+  const summary = `Mismatch: ${(mismatchRatio * 100).toFixed(2)}% | ${edits.length} edits needed | Top targets: ${topSelectors || "none"}`;
+
+  // MISSING_NODE entries as "add element" instructions
+  const missingNodes = issues
+    .filter((i: any) => i.code === "MISSING_NODE")
+    .slice(0, 5)
+    .map((issue: any) => ({
+      action: "add-element",
+      anchorName: issue.anchorName,
+      selector: issue.cssSelector ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined),
+      description: issue.message,
+      referenceStyles: issue.reference ? {
+        ...(issue.reference.bounds ? {
+          left: `${issue.reference.bounds.x}px`,
+          top: `${issue.reference.bounds.y}px`,
+          width: `${issue.reference.bounds.width}px`,
+          height: `${issue.reference.bounds.height}px`,
+          position: "absolute"
+        } : {}),
+        ...(issue.reference.fill ? { "background-color": issue.reference.fill } : {}),
+        ...(issue.reference.borderRadius ? { "border-radius": `${issue.reference.borderRadius}px` } : {})
+      } : {}
+    }));
 
   return {
     version: VERSION,
     pass: passNumber,
-    mismatchRatio: compareReport.summary?.mismatchRatio ?? 0,
-    patchCount: patches.length,
-    patches,
+    summary,
+    mismatchRatio,
+    editCount: edits.length,
+    edits,
+    missingElements: missingNodes,
     topEditCandidates: topEditCandidates.slice(0, 5)
   };
 }
