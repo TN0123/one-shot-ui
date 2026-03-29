@@ -17,6 +17,7 @@ import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill } from "@one-shot-ui/vision-style";
 import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
+import { segmentMismatch } from "./segmented-mismatch.js";
 
 export interface CompareImagesOptions {
   heatmapPath?: string;
@@ -110,6 +111,12 @@ export async function compareImages(
     diffColor: [255, 64, 64],
     diffColorAlt: [64, 160, 255]
   });
+
+  const segmented = segmentMismatch(
+    diff.data, width, height,
+    referencePng.data, width, 4,
+    referenceLayout, startX, startY
+  );
 
   const issues: CompareIssue[] = [];
   if (referenceImage.width !== implementationImage.width || referenceImage.height !== implementationImage.height) {
@@ -300,7 +307,12 @@ export async function compareImages(
       matchedLayoutNodes: layoutMatches.length,
       widthDelta: implementationImage.width - referenceImage.width,
       heightDelta: implementationImage.height - referenceImage.height,
-      focus: focusDiagnostics
+      focus: focusDiagnostics,
+      segmented: {
+        structuralMismatch: segmented.structuralRatio,
+        contentMismatch: segmented.contentRatio,
+        contentRegionCount: segmented.contentRegions.length,
+      },
     },
     issues: filteredIssues,
     groupedIssues,
