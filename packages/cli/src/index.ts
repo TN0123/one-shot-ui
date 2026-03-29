@@ -145,6 +145,10 @@ program
     }
 
     console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
+    if (report.summary.segmented) {
+      const seg = report.summary.segmented;
+      console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content (irreducible): ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+    }
     console.log(`Issues: ${report.issues.length}`);
     for (const issue of report.issues.slice(0, Math.min(8, report.issues.length))) {
       const prefix = issue.anchorName ? `${issue.anchorName}: ` : "";
