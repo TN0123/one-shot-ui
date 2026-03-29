@@ -297,7 +297,12 @@ export const compareReportSchema = z.object({
       realAnchorCount: z.number().int().nonnegative(),
       syntheticAnchorCount: z.number().int().nonnegative(),
       fallbackToPixelOnly: z.boolean()
-    }).optional()
+    }).optional(),
+    segmented: z.object({
+      structuralMismatch: z.number(),
+      contentMismatch: z.number(),
+      contentRegionCount: z.number().int().nonnegative(),
+    }).optional(),
   }),
   issues: z.array(compareIssueSchema),
   groupedIssues: z.array(z.object({
@@ -326,7 +331,8 @@ export const compareReportSchema = z.object({
       bounds: boundsSchema,
       mismatchRatio: z.number().min(0).max(1)
     })).optional()
-  })
+  }),
+  referenceColors: z.array(colorSwatchSchema).optional(),
 });
 
 export const benchmarkCaseRegionSchema = z.object({
