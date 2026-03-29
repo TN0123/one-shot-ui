@@ -1,5 +1,7 @@
 import type { FontFamilyCandidate, TextBlock } from "@one-shot-ui/core";
 import { loadImage, samplePixel } from "@one-shot-ui/image-io";
+import { preprocessForOcr } from "./preprocess.js";
+import { unlink } from "node:fs/promises";
 
 export interface ExtractTextOptions {
   disableOcr?: boolean;
@@ -12,12 +14,14 @@ export async function extractText(imagePath: string, options?: ExtractTextOption
   }
 
   let worker: any = null;
+  let preprocessedPath: string | null = null;
 
   try {
+    preprocessedPath = await preprocessForOcr(imagePath);
     const { createWorker } = await import("tesseract.js");
     const image = await loadImage(imagePath);
     worker = await createWorker("eng");
-    const result = await worker!.recognize(imagePath);
+    const result = await worker!.recognize(preprocessedPath);
 
     const blocks = (result.data.blocks ?? [])
       .map((block: any, index: number) => {
@@ -52,6 +56,8 @@ export async function extractText(imagePath: string, options?: ExtractTextOption
       await worker.terminate().catch(() => undefined);
     }
     return [];
+  } finally {
+    if (preprocessedPath) await unlink(preprocessedPath).catch(() => {});
   }
 }
 
