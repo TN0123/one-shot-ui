@@ -247,6 +247,7 @@ export const compareIssueSchema = z.object({
     "FONT_WEIGHT_MISMATCH",
     "FONT_FAMILY_MISMATCH",
     "COLOR_MISMATCH",
+    "COLOR_MISMATCH_AT_POSITION",
     "SHADOW_MISMATCH",
     "GRADIENT_MISMATCH",
     "MISSING_NODE",

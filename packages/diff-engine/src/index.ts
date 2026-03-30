@@ -209,6 +209,38 @@ export async function compareImages(
         continue; // Skip — this node is mostly covered by an existing implementation node
       }
 
+      // Check for "matched but imprecise": an unmatched impl node at roughly
+      // the same position and size but with different color/gradient
+      const nearbyImpl = implementationLayout.find(impl => {
+        if (matchedImplementationIds.has(impl.id)) return false;
+        const dx = Math.abs(impl.bounds.x - node.bounds.x);
+        const dy = Math.abs(impl.bounds.y - node.bounds.y);
+        const dw = Math.abs(impl.bounds.width - node.bounds.width);
+        const dh = Math.abs(impl.bounds.height - node.bounds.height);
+        return dx <= 20 && dy <= 20 && dw <= 20 && dh <= 20;
+      });
+
+      if (nearbyImpl) {
+        const anchor = resolveAnchor(referenceAnchors, node);
+        const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
+        issues.push({
+          code: "COLOR_MISMATCH_AT_POSITION",
+          nodeId: node.id,
+          anchorId: anchor?.id,
+          anchorName: anchor?.name,
+          contextPath: buildContextPath(anchor, referenceAnchors),
+          severity: "medium",
+          message: `${describeAnchor(anchor, node.id)} exists at the expected position but has wrong color/style.`,
+          suggestedFix: `Change the fill color to ${node.fill ?? "match reference"}.`,
+          reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
+          implementation: { bounds: nearbyImpl.bounds, fill: nearbyImpl.fill, borderRadius: nearbyImpl.borderRadius },
+          issueBounds: node.bounds,
+          visualWeight: nodeVw
+        });
+        matchedImplementationIds.add(nearbyImpl.id);
+        continue;
+      }
+
       const anchor = resolveAnchor(referenceAnchors, node);
       const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
       issues.push({

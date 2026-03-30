@@ -877,6 +877,14 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
         }
         break;
       }
+      case "COLOR_MISMATCH_AT_POSITION": {
+        const ref = issue.reference as { fill: string } | undefined;
+        if (ref?.fill) {
+          fix.css = `background-color: ${ref.fill};`;
+          fix.description = `${issue.message} Expected color: ${ref.fill}`;
+        }
+        break;
+      }
       case "SHADOW_MISMATCH": {
         const ref = issue.reference as { shadow: { xOffset: number; yOffset: number; blurRadius: number; spread: number; color: string } | null } | undefined;
         if (ref?.shadow) {
@@ -969,6 +977,7 @@ const issueCategoryMap: Record<string, string> = {
   FONT_WEIGHT_MISMATCH: "typography",
   FONT_FAMILY_MISMATCH: "typography",
   COLOR_MISMATCH: "style",
+  COLOR_MISMATCH_AT_POSITION: "style",
   SHADOW_MISMATCH: "style",
   GRADIENT_MISMATCH: "style",
   MISSING_NODE: "structure",
@@ -1314,6 +1323,11 @@ function extractCssProperties(issue: any): Record<string, string> {
       }
       break;
     case "COLOR_MISMATCH":
+      if (ref?.fill) {
+        props["background-color"] = impl?.fill ? `${impl.fill} -> ${ref.fill}` : ref.fill;
+      }
+      break;
+    case "COLOR_MISMATCH_AT_POSITION":
       if (ref?.fill) {
         props["background-color"] = impl?.fill ? `${impl.fill} -> ${ref.fill}` : ref.fill;
       }
