@@ -265,20 +265,45 @@ program
     }
 
     if (options.output) {
-      const outputDir = resolve(options.output);
-      await mkdir(outputDir, { recursive: true });
-      await writeFile(resolve(outputDir, "index.html"), scaffold.html, "utf8");
-      await writeFile(resolve(outputDir, "styles.css"), scaffold.css, "utf8");
+      const outputPath = resolve(options.output);
 
-      if (scaffold.react) {
-        for (const file of scaffold.react.files) {
-          const filePath = resolve(outputDir, file.path);
-          await mkdir(dirname(filePath), { recursive: true });
-          await writeFile(filePath, file.content, "utf8");
+      // If the output path looks like an HTML file, write directly as a file
+      if (outputPath.endsWith(".html") || outputPath.endsWith(".htm")) {
+        await mkdir(dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, scaffold.html, "utf8");
+
+        // Write CSS alongside
+        const cssPath = outputPath.replace(/\.html?$/i, ".css");
+        await writeFile(cssPath, scaffold.css, "utf8");
+
+        if (scaffold.react) {
+          const reactDir = dirname(outputPath);
+          for (const file of scaffold.react.files) {
+            const filePath = resolve(reactDir, file.path);
+            await mkdir(dirname(filePath), { recursive: true });
+            await writeFile(filePath, file.content, "utf8");
+          }
         }
+
+        console.log(`Scaffold written to ${outputPath}`);
+      } else {
+        // Treat as directory
+        const outputDir = outputPath;
+        await mkdir(outputDir, { recursive: true });
+        await writeFile(resolve(outputDir, "index.html"), scaffold.html, "utf8");
+        await writeFile(resolve(outputDir, "styles.css"), scaffold.css, "utf8");
+
+        if (scaffold.react) {
+          for (const file of scaffold.react.files) {
+            const filePath = resolve(outputDir, file.path);
+            await mkdir(dirname(filePath), { recursive: true });
+            await writeFile(filePath, file.content, "utf8");
+          }
+        }
+
+        console.log(`Scaffold written to ${outputDir}`);
       }
 
-      console.log(`Scaffold written to ${outputDir}`);
       if (scaffold.react) {
         console.log(`React files: ${scaffold.react.files.length}`);
       }
