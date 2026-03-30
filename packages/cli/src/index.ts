@@ -321,7 +321,8 @@ program
 program
   .command("run")
   .argument("<referencePath>", "Path to the reference screenshot")
-  .requiredOption("--impl <path>", "Path to implementation HTML file or URL")
+  .option("--impl <path>", "Path to implementation HTML file or URL")
+  .option("--file <path>", "Alias for --impl")
   .option("--output <dir>", "Working directory for intermediate files", "./one-shot-run")
   .option("--max-passes <n>", "Maximum refinement passes", "5")
   .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
@@ -330,7 +331,13 @@ program
   .option("--dry-run", "Output what changes are needed without modifying files", false)
   .action(async (referencePath, options) => {
     ensureChromium();
-    const outputDir = resolve(options.output);
+    const implPath = options.impl ?? options.file;
+    if (!implPath) {
+      console.error("Error: --impl (or --file) is required. Provide the path to the implementation HTML file or URL.");
+      process.exit(1);
+    }
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const outputDir = resolve(options.output, `run-${timestamp}`);
     await mkdir(outputDir, { recursive: true });
 
     const maxPasses = Number.parseInt(options.maxPasses, 10);
@@ -344,7 +351,7 @@ program
 
     console.log(`Starting multi-pass orchestration...`);
     console.log(`Reference: ${referencePath} (${captureWidth}x${captureHeight})`);
-    console.log(`Implementation: ${options.impl}`);
+    console.log(`Implementation: ${implPath}`);
     console.log(`Capture viewport: ${captureWidth}x${captureHeight} (auto-matched to reference)`);
     console.log(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
     console.log();
@@ -376,10 +383,10 @@ program
       // Capture
       const captureOutput = resolve(outputDir, `pass-${passNumber}-capture.png`);
       try {
-        const isFile = !options.impl.startsWith("http");
+        const isFile = !implPath.startsWith("http");
         await captureScreenshot({
-          url: isFile ? undefined : options.impl,
-          filePath: isFile ? resolve(options.impl) : undefined,
+          url: isFile ? undefined : implPath,
+          filePath: isFile ? resolve(implPath) : undefined,
           outputPath: captureOutput,
           width: captureWidth,
           height: captureHeight,
@@ -548,7 +555,7 @@ program
     const sessionReport = {
       version: VERSION,
       reference: resolve(referencePath),
-      implementation: options.impl,
+      implementation: implPath,
       totalPasses: passNumber,
       finalMismatchRatio: currentMismatchRatio,
       converged: currentMismatchRatio <= threshold,
