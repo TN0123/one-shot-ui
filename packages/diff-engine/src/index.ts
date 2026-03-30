@@ -1246,8 +1246,39 @@ function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[
       : i.cssSelector;
 
     const cssChanges: string[] = [];
-    if (i.suggestedFix) cssChanges.push(i.suggestedFix);
-    if (i.cssProperty) cssChanges.push(`${i.cssProperty}: /* see fix */`);
+    const ref = i.reference as any;
+    const impl = i.implementation as any;
+
+    switch (i.code) {
+      case "SIZE_MISMATCH":
+        if (ref?.width != null) cssChanges.push(`width: ${ref.width}px; /* content-box */`);
+        if (ref?.height != null) cssChanges.push(`height: ${ref.height}px; /* content-box */`);
+        break;
+      case "POSITION_MISMATCH":
+        if (ref?.x != null) cssChanges.push(`left: ${ref.x}px;`);
+        if (ref?.y != null) cssChanges.push(`top: ${ref.y}px;`);
+        break;
+      case "COLOR_MISMATCH":
+      case "COLOR_MISMATCH_AT_POSITION":
+        if (ref?.fill) cssChanges.push(`background-color: ${ref.fill};`);
+        break;
+      case "BORDER_RADIUS_MISMATCH":
+        if (ref?.borderRadius != null) cssChanges.push(`border-radius: ${ref.borderRadius}px;`);
+        break;
+      case "SHADOW_MISMATCH":
+        if (ref?.shadow) {
+          const s = ref.shadow;
+          cssChanges.push(`box-shadow: ${s.xOffset}px ${s.yOffset}px ${s.blurRadius}px ${s.spread}px ${s.color};`);
+        }
+        break;
+      default:
+        if (i.suggestedFix) cssChanges.push(i.suggestedFix);
+        break;
+    }
+
+    if (cssChanges.length === 0 && i.suggestedFix) {
+      cssChanges.push(i.suggestedFix);
+    }
 
     return {
       rank: idx + 1,
