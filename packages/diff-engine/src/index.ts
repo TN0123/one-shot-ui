@@ -250,8 +250,8 @@ export async function compareImages(
         anchorName: anchor?.name,
         contextPath: buildContextPath(anchor, referenceAnchors),
         severity: "high",
-        message: `${describeAnchor(anchor, node.id)} is missing from the implementation.`,
-        suggestedFix: `Add the missing ${describeAnchor(anchor, "region")} using the same fill, size, and border treatment as the reference.`,
+        message: `${describeAnchor(anchor, describeNodePosition(node.bounds, width, height))} is missing from the implementation.`,
+        suggestedFix: `Add the missing ${describeAnchor(anchor, describeNodePosition(node.bounds, width, height))} using the same fill, size, and border treatment as the reference.`,
         reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
         issueBounds: node.bounds,
         visualWeight: nodeVw
@@ -274,7 +274,7 @@ export async function compareImages(
         anchorName: anchor?.name,
         contextPath: buildContextPath(anchor, referenceAnchors),
         severity: "medium",
-        message: `The implementation has an extra surface near ${describeAnchor(anchor, "this area")}.`,
+        message: `The implementation has an extra surface near ${describeAnchor(anchor, describeNodePosition(node.bounds, width, height))}.`,
         suggestedFix: "Remove the extra surface or merge it into an existing component.",
         implementation: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
         issueBounds: node.bounds,
@@ -1041,7 +1041,30 @@ function findClosestAnchor(anchors: SemanticAnchor[], bounds: Bounds): SemanticA
       best = { anchor, score };
     }
   }
-  return best?.anchor;
+  if (best) return best.anchor;
+
+  // Fallback: find the containing anchor (bounds inside anchor)
+  for (const anchor of anchors) {
+    if (anchor.bounds.x <= bounds.x &&
+        anchor.bounds.y <= bounds.y &&
+        anchor.bounds.x + anchor.bounds.width >= bounds.x + bounds.width &&
+        anchor.bounds.y + anchor.bounds.height >= bounds.y + bounds.height) {
+      return anchor;
+    }
+  }
+
+  return undefined;
+}
+
+function describeNodePosition(bounds: Bounds, totalWidth: number, totalHeight: number): string {
+  const cx = bounds.x + bounds.width / 2;
+  const cy = bounds.y + bounds.height / 2;
+  const hPos = cx < totalWidth * 0.33 ? "left" : cx > totalWidth * 0.67 ? "right" : "center";
+  const vPos = cy < totalHeight * 0.25 ? "top" : cy > totalHeight * 0.75 ? "bottom" : "middle";
+  const w = bounds.width;
+  const h = bounds.height;
+  const shape = w > h * 3 ? "bar" : h > w * 3 ? "column" : w > h * 1.5 ? "wide-block" : "block";
+  return `${vPos}-${hPos}-${shape}`;
 }
 
 function describeAnchor(anchor: SemanticAnchor | undefined, fallback: string): string {
