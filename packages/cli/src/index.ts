@@ -327,6 +327,7 @@ program
   .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--json", "Print session log as JSON", false)
+  .option("--dry-run", "Output what changes are needed without modifying files", false)
   .action(async (referencePath, options) => {
     ensureChromium();
     const outputDir = resolve(options.output);
@@ -485,6 +486,22 @@ program
       );
 
       console.log(`  ${nextActions.summary}`);
+      if (options.dryRun) {
+        console.log(`\n[Dry Run] Suggested edits for pass ${passNumber}:`);
+        for (const edit of nextActions.edits) {
+          console.log(`\n${edit.cssRuleBlock}`);
+        }
+        if (nextActions.missingElements.length > 0) {
+          console.log(`\nMissing elements to add:`);
+          for (const missing of nextActions.missingElements) {
+            console.log(`  ${missing.description}`);
+            if (missing.referenceStyles) {
+              const styles = Object.entries(missing.referenceStyles).map(([k, v]) => `${k}: ${v}`).join("; ");
+              console.log(`  Styles: ${styles}`);
+            }
+          }
+        }
+      }
       console.log(`  Heatmap: ${heatmapPath}`);
       console.log();
     }
@@ -1235,6 +1252,12 @@ function buildNextActions(compareReport: any, passNumber: number) {
       } : {}
     }));
 
+  const searchReplaceEdits = edits.map(e => ({
+    selector: e.selector,
+    cssProperties: e.targetProperties,
+    description: e.reasons.join("; ")
+  }));
+
   return {
     version: VERSION,
     pass: passNumber,
@@ -1242,6 +1265,7 @@ function buildNextActions(compareReport: any, passNumber: number) {
     mismatchRatio,
     editCount: edits.length,
     edits,
+    searchReplaceEdits,
     missingElements: missingNodes,
     topEditCandidates: topEditCandidates.slice(0, 5),
     referenceColors: compareReport.referenceColors ?? []
