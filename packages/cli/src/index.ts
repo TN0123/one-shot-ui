@@ -669,7 +669,7 @@ program
     console.log(`${fixes.length} suggested fixes (ordered by priority):\n`);
     for (const fix of fixes) {
       const label = fix.anchorName ? `${fix.anchorName} · ` : "";
-      console.log(`[${fix.priority}] ${fix.category}: ${label}${fix.description}`);
+      console.log(`[${fix.priority}] ${fix.category}: ${label}${fix.description} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
       if (fix.css) console.log(`  CSS: ${fix.css}`);
       if (fix.cssSelector) console.log(`  Selector: ${fix.cssSelector}`);
       console.log();
@@ -863,6 +863,7 @@ type ImplementationFix = {
   description: string;
   css?: string;
   cssSelector?: string;
+  confidence: number;
 };
 
 function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
@@ -875,7 +876,8 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       nodeId: issue.nodeId,
       anchorName: issue.anchorName,
       description: issue.message,
-      cssSelector: issue.cssSelector
+      cssSelector: issue.cssSelector,
+      confidence: 0.2
     };
 
     // DOM-level issues already have CSS-specific suggestions
@@ -972,6 +974,29 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
         break;
       }
     }
+
+    // Ensure every fix has a CSS selector
+    if (!fix.cssSelector && issue.anchorName) {
+      fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+    }
+    if (!fix.cssSelector && issue.nodeId) {
+      fix.cssSelector = `[data-node="${issue.nodeId}"]`;
+    }
+
+    // Fallback: always provide at least a color suggestion
+    if (!fix.css && issue.reference) {
+      const ref = issue.reference as any;
+      if (ref.fill) {
+        fix.css = `background-color: ${ref.fill};`;
+      } else if (ref.bounds) {
+        fix.css = `/* Position: (${ref.bounds.x}, ${ref.bounds.y}) ${ref.bounds.width}x${ref.bounds.height} */`;
+      }
+    }
+
+    // Assign confidence based on specificity
+    fix.confidence = fix.css && fix.cssSelector ? 0.9 :
+                     fix.css ? 0.6 :
+                     fix.cssSelector ? 0.4 : 0.2;
 
     fixes.push(fix);
   }
