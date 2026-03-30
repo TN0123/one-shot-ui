@@ -328,7 +328,7 @@ program
   .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--json", "Print session log as JSON", false)
-  .option("--dry-run", "Output what changes are needed without modifying files", false)
+  .option("--dry-run", "Print detailed suggested edits for each pass", false)
   .action(async (referencePath, options) => {
     ensureChromium();
     const implPath = options.impl ?? options.file;
@@ -1355,6 +1355,7 @@ function describeAction(code: string): string {
     case "POSITION_MISMATCH": return "adjust-position";
     case "SIZE_MISMATCH": return "adjust-size";
     case "COLOR_MISMATCH": return "change-color";
+    case "COLOR_MISMATCH_AT_POSITION": return "change-color";
     case "BORDER_RADIUS_MISMATCH": return "adjust-border-radius";
     case "SHADOW_MISMATCH": return "adjust-shadow";
     case "GRADIENT_MISMATCH": return "adjust-gradient";

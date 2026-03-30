@@ -157,6 +157,7 @@ function generateFallbackFromNodes(
 
   const sorted = [...nodes].sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
   const placedText = new Set<string>();
+  const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
 
   for (const node of sorted) {
     const role = inferNodeRole(node, nodes);
@@ -183,7 +184,6 @@ function generateFallbackFromNodes(
     css += `.${className} {\n`;
     css += `  box-sizing: border-box;\n`;
 
-    const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
     const widthPct = Math.round((node.bounds.width / pageWidth) * 100);
     if (widthPct >= 95) {
       css += `  width: 100%;\n`;
