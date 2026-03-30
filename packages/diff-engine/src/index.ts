@@ -863,6 +863,26 @@ function compareText(referenceText: TextBlock[], implementationText: TextBlock[]
     }
   }
 
+  // Add font classification hints to font-related issues
+  for (const match of matches) {
+    if (match.reference.typography?.fontSize) {
+      const size = match.reference.typography.fontSize;
+      const weight = match.reference.typography.fontWeight ?? 400;
+      const classification = size >= 28 ? "heading" : size >= 20 ? "subheading" : "body";
+      const weightLabel = weight >= 700 ? "bold" : weight >= 500 ? "medium" : "regular";
+      const candidates = match.reference.typography.fontFamilyCandidates;
+      const familyHint = candidates?.length ? candidates[0]!.family : "unknown";
+      const serifHint = familyHint.match(/serif|georgia|times/i) ? "serif" :
+                        familyHint.match(/mono|courier|consolas/i) ? "monospace" : "sans-serif";
+
+      for (const issue of issues) {
+        if (issue.nodeId === match.reference.id && issue.code.startsWith("FONT_")) {
+          issue.message += ` (${classification}, ${weightLabel} ${serifHint}, ~${size}px)`;
+        }
+      }
+    }
+  }
+
   return issues;
 }
 
