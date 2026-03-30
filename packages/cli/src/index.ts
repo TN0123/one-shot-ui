@@ -422,6 +422,43 @@ program
         }
       });
 
+      // Regression detection
+      const previousRatios = sessionLog
+        .filter(e => e.phase === "compare" && e.result?.mismatchRatio != null)
+        .map(e => e.result.mismatchRatio as number);
+      // Note: previousRatios includes the current pass since we just pushed it
+      const priorRatios = previousRatios.slice(0, -1);
+
+      if (priorRatios.length > 0) {
+        const prevRatio = priorRatios[priorRatios.length - 1]!;
+        if (currentMismatchRatio > prevRatio) {
+          const delta = currentMismatchRatio - prevRatio;
+          console.log(`  REGRESSION_WARNING: Mismatch increased by ${(delta * 100).toFixed(2)}pp (${(prevRatio * 100).toFixed(2)}% -> ${(currentMismatchRatio * 100).toFixed(2)}%)`);
+          console.log(`  Consider reverting the last change or trying a smaller adjustment.`);
+        }
+      }
+
+      // Plateau detection
+      if (previousRatios.length >= 3) {
+        const recent = previousRatios.slice(-3);
+        const maxRecent = Math.max(...recent);
+        const minRecent = Math.min(...recent);
+        if ((maxRecent - minRecent) < 0.005) {
+          console.log(`  PLATEAU_REACHED: Last ${recent.length} passes within ${((maxRecent - minRecent) * 100).toFixed(2)}pp of each other.`);
+          console.log(`  Remaining mismatch may be irreducible (font rendering, photographic content). Consider stopping.`);
+        }
+      }
+
+      // Oscillation detection
+      if (previousRatios.length >= 3) {
+        const r = previousRatios.slice(-3);
+        const oscillating = (r[1]! > r[0]! && r[1]! > r[2]!) || (r[1]! < r[0]! && r[1]! < r[2]!);
+        if (oscillating) {
+          const avg = (r[0]! + r[1]! + r[2]!) / 3;
+          console.log(`  OSCILLATION_DETECTED: Mismatch alternating around ${(avg * 100).toFixed(2)}%. Try splitting the difference on changed values.`);
+        }
+      }
+
       console.log(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
       console.log(`  Issues: ${compareReport.issues.length}`);
 
@@ -1397,7 +1434,21 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
   const lastTwo = ratios.slice(-2);
   const stalled = Math.abs(lastTwo[0]! - lastTwo[1]!) < 0.005;
 
+  // Plateau: last 3+ passes within 0.5%
+  const plateau = ratios.length >= 3 && (() => {
+    const recent = ratios.slice(-3);
+    return (Math.max(...recent) - Math.min(...recent)) < 0.005;
+  })();
+
+  // Oscillation: alternating up/down in last 3 passes
+  const oscillating = ratios.length >= 3 && (() => {
+    const r = ratios.slice(-3);
+    return (r[1]! > r[0]! && r[1]! > r[2]!) || (r[1]! < r[0]! && r[1]! < r[2]!);
+  })();
+
   const trend = lastRatio <= threshold ? "converged" :
+    oscillating ? "oscillating" :
+    plateau ? "plateau" :
     stalled ? "stalled" :
     totalImprovement > 0 ? "improving" : "regressing";
 
@@ -1405,11 +1456,17 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
     trend,
     improvementRate: Math.round(improvementRate * 100) / 100,
     stalled,
+    plateau,
+    oscillating,
     ratioHistory: ratios,
     message: trend === "converged"
       ? `Converged at ${(lastRatio * 100).toFixed(2)}% mismatch after ${ratios.length} passes.`
       : trend === "stalled"
       ? `Progress stalled at ${(lastRatio * 100).toFixed(2)}% mismatch. Consider a different approach for remaining issues.`
+      : trend === "oscillating"
+      ? `Oscillating around ${(lastRatio * 100).toFixed(2)}% mismatch. Try splitting the difference on changed properties.`
+      : trend === "plateau"
+      ? `Plateau at ${(lastRatio * 100).toFixed(2)}% mismatch. Remaining differences may be irreducible.`
       : trend === "improving"
       ? `Improving: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}% (${(improvementRate * 100).toFixed(0)}% improvement).`
       : `Regression detected: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}%.`
