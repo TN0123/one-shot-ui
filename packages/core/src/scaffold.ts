@@ -112,10 +112,38 @@ function shouldUseFallback(anchors: SemanticAnchor[], nodes: LayoutNode[]): bool
   return coverage < 0.35;
 }
 
+function inferNodeRole(
+  node: LayoutNode,
+  allNodes: LayoutNode[]
+): "header" | "footer" | "sidebar" | "main" | "section" {
+  const maxWidth = Math.max(...allNodes.map(n => n.bounds.x + n.bounds.width));
+  const maxHeight = Math.max(...allNodes.map(n => n.bounds.y + n.bounds.height));
+  const widthRatio = node.bounds.width / Math.max(1, maxWidth);
+  const heightRatio = node.bounds.height / Math.max(1, maxHeight);
+  const topRatio = node.bounds.y / Math.max(1, maxHeight);
+  const bottomEdgeRatio = (node.bounds.y + node.bounds.height) / Math.max(1, maxHeight);
+
+  if (widthRatio > 0.6 && heightRatio < 0.18 && topRatio < 0.05) return "header";
+  if (widthRatio > 0.6 && heightRatio < 0.18 && bottomEdgeRatio > 0.9) return "footer";
+  if (heightRatio > 0.45 && widthRatio < 0.3) return "sidebar";
+  if (widthRatio > 0.5 && heightRatio > 0.3) return "main";
+  return "section";
+}
+
+function roleToTag(role: string): string {
+  switch (role) {
+    case "header": return "nav";
+    case "footer": return "footer";
+    case "sidebar": return "aside";
+    case "main": return "main";
+    default: return "section";
+  }
+}
+
 /**
- * Generate absolute-positioned divs from raw layout nodes when semantic
+ * Generate semantic HTML from raw layout nodes when semantic
  * anchor coverage is too low for the structured scaffold to be useful.
- * Produces correct colors, approximate positions, sizes, border-radius, and text.
+ * Uses flexbox layout, semantic tags, OCR text content, and percentage-based widths.
  */
 function generateFallbackFromNodes(
   nodes: LayoutNode[],
@@ -123,40 +151,56 @@ function generateFallbackFromNodes(
   tokens: DesignToken[]
 ): { html: string; css: string } {
   let html = "";
-  let css = `/* Fallback scaffold: absolute-positioned from raw layout nodes */\n`;
+  let css = `/* Semantic scaffold from layout detection + OCR */\n`;
 
-  css += `.page {\n  position: relative;\n  width: 100%;\n  min-height: 100vh;\n  box-sizing: border-box;\n}\n\n`;
+  css += `.page {\n  display: flex;\n  flex-direction: column;\n  width: 100%;\n  min-height: 100vh;\n  box-sizing: border-box;\n}\n\n`;
 
-  // Sort nodes by area (largest first) so bigger containers render behind smaller ones
-  const sorted = [...nodes].sort((a, b) => {
-    const areaA = a.bounds.width * a.bounds.height;
-    const areaB = b.bounds.width * b.bounds.height;
-    return areaB - areaA;
-  });
+  const sorted = [...nodes].sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
+  const placedText = new Set<string>();
 
   for (const node of sorted) {
-    const className = `node-${node.id}`;
-    const containedText = textBlocks.filter(tb => scaffoldBoundsContain(node.bounds, tb.bounds));
+    const role = inferNodeRole(node, nodes);
+    const tag = roleToTag(role);
+    const className = `${role}-${node.id}`;
+    const containedText = textBlocks.filter(
+      tb => !placedText.has(tb.id) && scaffoldBoundsContain(node.bounds, tb.bounds)
+    );
 
-    // HTML
+    for (const tb of containedText) placedText.add(tb.id);
+    containedText.sort((a, b) => a.bounds.y - b.bounds.y);
+
     let inner = "";
     if (containedText.length > 0) {
       for (const tb of containedText) {
         const fontSize = tb.typography?.fontSize ?? 0;
-        const tag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
-        inner += `      <${tag}>${escapeHtml(tb.text)}</${tag}>\n`;
+        const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
+        inner += `      <${textTag}>${escapeHtml(tb.text)}</${textTag}>\n`;
       }
     }
 
-    html += `    <div class="${className}" data-node="${node.id}">\n${inner}    </div>\n`;
+    html += `    <${tag} class="${className}" data-node="${node.id}">\n${inner}    </${tag}>\n`;
 
-    // CSS
     css += `.${className} {\n`;
-    css += `  position: absolute;\n`;
-    css += `  left: ${node.bounds.x}px;\n`;
-    css += `  top: ${node.bounds.y}px;\n`;
-    css += `  width: ${node.bounds.width}px;\n`;
-    css += `  height: ${node.bounds.height}px;\n`;
+    css += `  box-sizing: border-box;\n`;
+
+    const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
+    const widthPct = Math.round((node.bounds.width / pageWidth) * 100);
+    if (widthPct >= 95) {
+      css += `  width: 100%;\n`;
+    } else {
+      css += `  width: ${widthPct}%;\n`;
+    }
+
+    css += `  min-height: ${node.bounds.height}px;\n`;
+
+    if (containedText.length > 0) {
+      const firstText = containedText[0]!;
+      const padLeft = Math.max(0, firstText.bounds.x - node.bounds.x);
+      const padTop = Math.max(0, firstText.bounds.y - node.bounds.y);
+      if (padLeft > 4 || padTop > 4) {
+        css += `  padding: ${padTop}px ${padLeft}px;\n`;
+      }
+    }
 
     if (node.fill) {
       const colorToken = tokens.find(t => t.type === "color" && String(t.value).toUpperCase() === node.fill?.toUpperCase());

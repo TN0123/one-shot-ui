@@ -33,10 +33,10 @@ describe("scaffold fallback", () => {
     ];
     const result = generateHtmlScaffold(makePlan(), [], [], nodes, []);
 
-    // Should produce absolute-positioned divs from raw nodes
-    expect(result.html).toContain("node-n1");
-    expect(result.html).toContain("node-n2");
-    expect(result.css).toContain("position: absolute");
+    // Should produce semantic elements from raw nodes
+    expect(result.html).toContain("data-node=\"n1\"");
+    expect(result.html).toContain("data-node=\"n2\"");
+    expect(result.css).toContain("display: flex");
     expect(result.css).toContain("#112233");
     expect(result.css).toContain("#445566");
   });
@@ -53,9 +53,9 @@ describe("scaffold fallback", () => {
     const result = generateHtmlScaffold(makePlan(), anchors, [], nodes, []);
 
     // Should fall back since only 1/10 nodes are anchored (10% < 35%)
-    expect(result.css).toContain("Fallback scaffold");
-    expect(result.html).toContain("node-n0");
-    expect(result.html).toContain("node-n5");
+    expect(result.css).toContain("Semantic scaffold from layout detection");
+    expect(result.html).toContain("data-node=\"n0\"");
+    expect(result.html).toContain("data-node=\"n5\"");
   });
 
   it("uses structured scaffold when anchor coverage is sufficient", () => {
@@ -109,6 +109,69 @@ describe("scaffold fallback", () => {
     const result = generateHtmlScaffold(makePlan(), [], [], [], []);
 
     // No nodes, no fallback — just empty page
-    expect(result.css).not.toContain("Fallback scaffold");
+    expect(result.css).not.toContain("Semantic scaffold from layout detection");
+  });
+});
+
+describe("generateHtmlScaffold fallback", () => {
+  const makeNode2 = (id: string, x: number, y: number, w: number, h: number, fill = "#FFFFFF") => ({
+    id, bounds: { x, y, width: w, height: h }, fill,
+    confidence: 0.8, gradient: null, borderRadius: null, shadow: null, componentId: null
+  });
+
+  const makeText = (id: string, text: string, x: number, y: number, w: number, h: number, fontSize = 16) => ({
+    id, text, bounds: { x, y, width: w, height: h },
+    typography: { fontSize, fontWeight: 400, lineHeight: fontSize * 1.2, fontFamilyCandidates: [] },
+    confidence: 0.8
+  });
+
+  const emptyPlan = {
+    page: { primaryStrategy: "flex" as const, notes: [] },
+    nodes: [],
+    cssPrimitives: [],
+    repeatedPatterns: [],
+    typography: { weak: true, confidence: 0, notes: ["no data"] }
+  };
+
+  it("produces semantic HTML tags instead of only absolute-positioned divs", () => {
+    const nodes = [
+      makeNode2("1", 0, 0, 1440, 80, "#1a1a1a"),
+      makeNode2("2", 0, 80, 1440, 800, "#FFFFFF"),
+      makeNode2("3", 0, 880, 1440, 60, "#333333"),
+    ];
+
+    const textBlocks = [
+      makeText("t1", "My Website", 20, 20, 200, 40, 28),
+      makeText("t2", "Welcome to the homepage", 100, 200, 400, 30, 20),
+      makeText("t3", "Copyright 2026", 600, 895, 200, 20, 14),
+    ];
+
+    const result = generateHtmlScaffold(emptyPlan, [], [], nodes, textBlocks, "structured");
+
+    // Should use semantic tags
+    expect(result.html).toContain("<nav");
+    expect(result.html).toContain("<main");
+    expect(result.html).toContain("<footer");
+    // Should contain OCR text
+    expect(result.html).toContain("My Website");
+    expect(result.html).toContain("Welcome to the homepage");
+    expect(result.html).toContain("Copyright 2026");
+    // Should use flexbox, not absolute positioning for the page container
+    expect(result.css).toContain("display: flex");
+    expect(result.css).toContain("flex-direction: column");
+  });
+
+  it("uses heading tags based on font size", () => {
+    const nodes = [makeNode2("1", 0, 0, 800, 400, "#FFFFFF")];
+    const textBlocks = [
+      makeText("t1", "Big Title", 10, 10, 300, 50, 32),
+      makeText("t2", "Subtitle", 10, 70, 200, 30, 22),
+      makeText("t3", "Body text here", 10, 110, 400, 20, 16),
+    ];
+
+    const result = generateHtmlScaffold(emptyPlan, [], [], nodes, textBlocks, "structured");
+    expect(result.html).toContain("<h1>Big Title</h1>");
+    expect(result.html).toContain("<h2>Subtitle</h2>");
+    expect(result.html).toContain("<p>Body text here</p>");
   });
 });
