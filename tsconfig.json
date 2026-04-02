@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
-    "types": ["node"],
+    "types": ["node", "bun"],
     "baseUrl": ".",
     "paths": {
       "@one-shot-ui/core": ["packages/core/src/index.ts"],

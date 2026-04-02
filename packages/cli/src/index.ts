@@ -264,8 +264,8 @@ program
 
     if (report.summary.segmented?.irreducibleEstimate != null) {
       const seg = report.summary.segmented;
-      const actionable = Math.max(0, report.summary.mismatchRatio - seg.irreducibleEstimate);
-      console.log(`Mismatch: ${(report.summary.mismatchRatio * 100).toFixed(1)}% (estimated actionable: ~${(actionable * 100).toFixed(1)}%, irreducible content: ~${(seg.irreducibleEstimate * 100).toFixed(1)}%)`);
+      const actionable = Math.max(0, report.summary.mismatchRatio - (seg.irreducibleEstimate ?? 0));
+      console.log(`Mismatch: ${(report.summary.mismatchRatio * 100).toFixed(1)}% (estimated actionable: ~${(actionable * 100).toFixed(1)}%, irreducible content: ~${((seg.irreducibleEstimate ?? 0) * 100).toFixed(1)}%)`);
       console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content: ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
     } else {
       console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
@@ -651,7 +651,8 @@ program
           outputPath: captureOutput,
           width: captureWidth,
           height: captureHeight,
-          deviceScaleFactor: 1
+          deviceScaleFactor: 1,
+          skipBlankCheck: false
         };
         try {
           await captureScreenshot(captureOpts);

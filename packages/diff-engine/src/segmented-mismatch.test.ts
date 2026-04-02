@@ -11,7 +11,9 @@ function makeNode(id: string, x: number, y: number, w: number, h: number): Layou
     opacity: 1,
     borderRadius: 0,
     shadow: null,
-    gradient: null
+    gradient: null,
+    componentId: null,
+    confidence: 0.8
   } as LayoutNode;
 }
 

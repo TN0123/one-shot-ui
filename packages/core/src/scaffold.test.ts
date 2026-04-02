@@ -134,13 +134,13 @@ describe("scaffold fallback", () => {
 
 describe("generateHtmlScaffold fallback", () => {
   const makeNode2 = (id: string, x: number, y: number, w: number, h: number, fill = "#FFFFFF") => ({
-    id, bounds: { x, y, width: w, height: h }, fill,
+    id, kind: "region" as const, bounds: { x, y, width: w, height: h }, fill,
     confidence: 0.8, gradient: null, borderRadius: null, shadow: null, componentId: null
   });
 
   const makeText = (id: string, text: string, x: number, y: number, w: number, h: number, fontSize = 16) => ({
     id, text, bounds: { x, y, width: w, height: h },
-    typography: { fontSize, fontWeight: 400, lineHeight: fontSize * 1.2, fontFamilyCandidates: [] },
+    typography: { fontSize, fontWeight: 400, lineHeight: fontSize * 1.2, letterSpacing: null, confidence: 0.8, fontFamilyCandidates: [] },
     confidence: 0.8
   });
 

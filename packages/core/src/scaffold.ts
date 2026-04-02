@@ -748,7 +748,7 @@ function generateTailwindFallbackJsx(
       for (const tb of containedText) {
         const fontSize = tb.typography?.fontSize ?? 0;
         const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
-        const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight);
+        const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight ?? undefined);
         lines.push(`${pad}  <${textTag} className="${textClasses}">${escapeJsx(tb.text)}</${textTag}>`);
       }
       lines.push(`${pad}</${tag}>`);
@@ -812,7 +812,7 @@ function generateTailwindAnchorJsx(
     for (const tb of containedText) {
       const fontSize = tb.typography?.fontSize ?? 0;
       const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
-      const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight);
+      const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight ?? undefined);
       content += `${pad}  <${textTag} className="${textClasses}">${escapeJsx(tb.text)}</${textTag}>\n`;
     }
     content += `${pad}</${tag}>`;
