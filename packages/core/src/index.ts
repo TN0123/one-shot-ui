@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const VERSION = "0.4.0";
+export const VERSION = process.env.npm_package_version ?? "0.0.0-dev";
 
 export const boundsSchema = z.object({
   x: z.number().nonnegative(),

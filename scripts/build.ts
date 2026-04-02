@@ -1,11 +1,14 @@
 import { $ } from "bun";
 import { readFile, writeFile, chmod } from "node:fs/promises";
 
+const pkg = JSON.parse(await readFile("package.json", "utf-8"));
+
 // 1. Bundle
 await $`bun build packages/cli/src/index.ts \
   --target=node \
   --format=esm \
   --outfile=dist/cli.mjs \
+  --define process.env.npm_package_version='"${pkg.version}"' \
   --external sharp \
   --external playwright \
   --external commander \
