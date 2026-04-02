@@ -185,7 +185,7 @@ export async function compareImages(
 
   if (!focusDiagnostics.fallbackToPixelOnly) {
     for (const match of layoutMatches) {
-      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors, totalImageArea));
+      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors, totalImageArea, width, height));
     }
 
     for (const node of referenceLayout) {
@@ -243,15 +243,22 @@ export async function compareImages(
 
       const anchor = resolveAnchor(referenceAnchors, node);
       const nodeVw = Math.min(1, (node.bounds.width * node.bounds.height) / Math.max(1, totalImageArea));
+      const anchorLabel = describeAnchor(anchor, describeNodePosition(node.bounds, width, height));
+      const fillDesc = node.fill ? ` with background ${node.fill}` : "";
+      const sizeDesc = `${node.bounds.width}x${node.bounds.height}px`;
+      const selectorHint = anchor
+        ? `.${anchor.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+        : undefined;
       issues.push({
         code: "MISSING_NODE",
         nodeId: node.id,
         anchorId: anchor?.id,
         anchorName: anchor?.name,
         contextPath: buildContextPath(anchor, referenceAnchors),
+        cssSelector: selectorHint,
         severity: "high",
-        message: `${describeAnchor(anchor, describeNodePosition(node.bounds, width, height))} is missing from the implementation.`,
-        suggestedFix: `Add the missing ${describeAnchor(anchor, describeNodePosition(node.bounds, width, height))} using the same fill, size, and border treatment as the reference.`,
+        message: `Missing element in ${anchor?.name ?? "page"}: ${sizeDesc} ${describeNodePosition(node.bounds, width, height)} region${fillDesc}.`,
+        suggestedFix: `Add a ${sizeDesc} element${fillDesc}${node.borderRadius ? ` with border-radius: ${node.borderRadius}px` : ""} inside ${anchor?.name ?? "the page layout"}.`,
         reference: { bounds: node.bounds, fill: node.fill, borderRadius: node.borderRadius },
         issueBounds: node.bounds,
         visualWeight: nodeVw
@@ -341,8 +348,44 @@ export async function compareImages(
     }
   }
 
+  // Categorize issues and tag actionability
+  for (const issue of issues) {
+    issue.category = categorizeIssue(issue, segmented.contentRegions, startX, startY);
+    issue.actionable = issue.category !== "content" && issue.category !== "typography";
+  }
+
+  // Tag content-category issues as non-actionable with explanation
+  for (const issue of issues) {
+    if (issue.category === "content" && issue.actionable === false) {
+      issue.message += " (non-actionable: photographic/dynamic content that cannot be replicated with CSS)";
+    } else if (issue.category === "typography" && issue.actionable === false) {
+      issue.message += " (non-actionable: font rendering differences are often irreducible)";
+    }
+  }
+
+  // Filter low-contribution issues: suppress issues whose mismatch contribution is <1% of total
+  const filteredByContribution = issues.filter(issue => {
+    if (!issue.issueBounds) return true; // Keep issues without bounds (PIXEL_DIFFERENCE, etc.)
+    if (issue.code === "DIMENSION_MISMATCH" || issue.code === "PIXEL_DIFFERENCE" || issue.code === "REGION_SEMANTIC_FALLBACK") return true;
+    const issueBoundsArea = issue.issueBounds.width * issue.issueBounds.height;
+    const totalArea = width * height;
+    if (totalArea === 0) return true;
+    const contribution = issueBoundsArea / totalArea;
+    return contribution >= 0.01;
+  });
+
   // Noise reduction: filter low-confidence issues and cap the list
-  const filteredIssues = applyNoiseReduction(sortIssues(issues), confidenceThreshold, top);
+  const filteredIssues = applyNoiseReduction(sortIssues(filteredByContribution), confidenceThreshold, top);
+
+  // Compute irreducible mismatch estimate from content-category issues
+  const contentIssueArea = filteredIssues
+    .filter(i => i.category === "content" && i.issueBounds)
+    .reduce((sum, i) => sum + (i.issueBounds!.width * i.issueBounds!.height), 0);
+  const irreducibleEstimate = (width * height) > 0
+    ? Math.min(segmented.contentRatio, contentIssueArea / (width * height)) + segmented.contentRatio * 0.5
+    : segmented.contentRatio;
+  // Cap at mismatchRatio (can't be more irreducible than total mismatch)
+  const clampedIrreducible = Math.min(irreducibleEstimate, mismatchRatio);
 
   const groupedIssues = groupIssuesBySection(filteredIssues, referenceAnchors);
   const topEditCandidates = buildTopEditCandidates(filteredIssues, referenceAnchors);
@@ -362,6 +405,7 @@ export async function compareImages(
         structuralMismatch: segmented.structuralRatio,
         contentMismatch: segmented.contentRatio,
         contentRegionCount: segmented.contentRegions.length,
+        irreducibleEstimate: clampedIrreducible,
       },
     },
     issues: filteredIssues,
@@ -494,6 +538,43 @@ function applyNoiseReduction(
   return filtered.slice(0, maxIssues);
 }
 
+/**
+ * Categorize an issue into: layout, color, typography, or content.
+ *
+ * Content regions are areas with high color variance (photographic).
+ * Issues that fall inside content regions are classified as "content".
+ */
+function categorizeIssue(
+  issue: CompareIssue,
+  contentRegions: Array<{ bounds: Bounds; area: number }>,
+  startX: number,
+  startY: number
+): "layout" | "color" | "typography" | "content" {
+  // Check if the issue falls inside a content region (photographic)
+  if (issue.issueBounds) {
+    for (const region of contentRegions) {
+      const oArea = computeOverlapArea(issue.issueBounds, region.bounds);
+      const issueArea = issue.issueBounds.width * issue.issueBounds.height;
+      if (issueArea > 0 && oArea / issueArea > 0.5) {
+        return "content";
+      }
+    }
+  }
+
+  // Typography issues
+  if (issue.code === "FONT_SIZE_MISMATCH" || issue.code === "FONT_WEIGHT_MISMATCH" || issue.code === "FONT_FAMILY_MISMATCH") {
+    return "typography";
+  }
+
+  // Color issues
+  if (issue.code === "COLOR_MISMATCH" || issue.code === "COLOR_MISMATCH_AT_POSITION" || issue.code === "GRADIENT_MISMATCH") {
+    return "color";
+  }
+
+  // Layout issues (position, size, spacing, missing/extra nodes, shadows, border-radius)
+  return "layout";
+}
+
 function getIssueBoundsArea(issue: CompareIssue): number {
   const impl = issue.implementation as { bounds?: { width: number; height: number } } | undefined;
   if (impl?.bounds) {
@@ -546,7 +627,7 @@ function matchLayoutNodes(referenceNodes: LayoutNode[], implementationNodes: Lay
   return matches;
 }
 
-function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[], totalImageArea = 1): CompareIssue[] {
+function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[], totalImageArea = 1, imageWidth = 0, imageHeight = 0): CompareIssue[] {
   const issues: CompareIssue[] = [];
   const anchor = resolveAnchor(anchors, reference);
   const anchorName = describeAnchor(anchor, reference.id);
@@ -556,15 +637,18 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
   const deltaX = implementation.bounds.x - reference.bounds.x;
   const deltaY = implementation.bounds.y - reference.bounds.y;
   if (Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6) {
+    const cssProp = inferPositionCssProperty(deltaX, deltaY, reference.bounds, imageWidth, imageHeight);
+    const regionDesc = anchor?.name ? ` on the ${anchor.name} region (y: ${reference.bounds.y}-${reference.bounds.y + reference.bounds.height})` : "";
     issues.push({
       code: "POSITION_MISMATCH",
       nodeId: reference.id,
       anchorId: anchor?.id,
       anchorName: anchor?.name,
       contextPath,
+      cssProperty: cssProp,
       severity: Math.abs(deltaX) > 16 || Math.abs(deltaY) > 16 ? "high" : "medium",
-      message: `${anchorName} is offset from the reference.`,
-      suggestedFix: buildRelativePositionFix(deltaX, deltaY),
+      message: `${anchorName} is offset by ${Math.abs(deltaY) > 6 ? `${Math.abs(deltaY)}px vertically` : ""}${Math.abs(deltaX) > 6 && Math.abs(deltaY) > 6 ? " and " : ""}${Math.abs(deltaX) > 6 ? `${Math.abs(deltaX)}px horizontally` : ""} — likely ${cssProp}${regionDesc}.`,
+      suggestedFix: buildRelativePositionFix(deltaX, deltaY, reference.bounds, imageWidth, imageHeight),
       reference: { x: reference.bounds.x, y: reference.bounds.y },
       implementation: { x: implementation.bounds.x, y: implementation.bounds.y },
       issueBounds: reference.bounds,
@@ -575,14 +659,16 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
   const widthDelta = implementation.bounds.width - reference.bounds.width;
   const heightDelta = implementation.bounds.height - reference.bounds.height;
   if (Math.abs(widthDelta) > 6 || Math.abs(heightDelta) > 6) {
+    const cssProp = inferSizeCssProperty(widthDelta, heightDelta);
     issues.push({
       code: "SIZE_MISMATCH",
       nodeId: reference.id,
       anchorId: anchor?.id,
       anchorName: anchor?.name,
       contextPath,
+      cssProperty: cssProp,
       severity: Math.abs(widthDelta) > 16 || Math.abs(heightDelta) > 16 ? "high" : "medium",
-      message: `${anchorName} size differs from the reference.`,
+      message: `${anchorName} size differs from the reference — adjust ${cssProp}.`,
       suggestedFix: buildRelativeSizeFix(widthDelta, heightDelta, reference.bounds),
       reference: { width: reference.bounds.width, height: reference.bounds.height },
       implementation: { width: implementation.bounds.width, height: implementation.bounds.height },
@@ -785,14 +871,18 @@ function compareSpacing(
       continue;
     }
 
+    const spacingCssProp = inferSpacingCssProperty(measurement.axis, true);
+    const fromAnchor = resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference);
+    const toAnchor = resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.toId)?.reference);
     issues.push({
       code: "SPACING_MISMATCH",
       nodeId: measurement.fromId,
-      anchorId: resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference)?.id,
-      anchorName: resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference)?.name,
+      anchorId: fromAnchor?.id,
+      anchorName: fromAnchor?.name,
       contextPath: buildSpacingContext(measurement, anchors),
+      cssProperty: spacingCssProp,
       severity: Math.abs(delta) >= 16 ? "medium" : "low",
-      message: `Spacing between ${describeAnchor(resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.fromId)?.reference), measurement.fromId)} and ${describeAnchor(resolveAnchor(anchors, matches.find((match) => match.reference.id === measurement.toId)?.reference), measurement.toId)} differs from the reference.`,
+      message: `Spacing between ${describeAnchor(fromAnchor, measurement.fromId)} and ${describeAnchor(toAnchor, measurement.toId)} differs by ${Math.abs(delta)}px — adjust ${spacingCssProp}.`,
       suggestedFix: buildSpacingFix(measurement.axis, delta, measurement.distance),
       reference: { distance: measurement.distance, alignment: measurement.alignment },
       implementation: { distance: implementationMeasurement.distance, alignment: implementationMeasurement.alignment }
@@ -974,31 +1064,72 @@ function signedPixels(value: number) {
   return `${value > 0 ? "+" : ""}${value}px`;
 }
 
-function buildRelativePositionFix(deltaX: number, deltaY: number): string {
-  const suggestions: string[] = [];
-  if (Math.abs(deltaX) > 6) {
-    suggestions.push(`${deltaX > 0 ? "move it left" : "move it right"} by ${Math.abs(deltaX)}px`);
+function inferPositionCssProperty(deltaX: number, deltaY: number, refBounds: Bounds, imageWidth: number, imageHeight: number): string {
+  // If offset is at top of page, likely padding-top or margin-top
+  if (Math.abs(deltaY) > 6 && refBounds.y < imageHeight * 0.15) {
+    return deltaY > 0 ? "padding-top" : "margin-top";
   }
-  if (Math.abs(deltaY) > 6) {
-    suggestions.push(`${deltaY > 0 ? "move it up" : "move it down"} by ${Math.abs(deltaY)}px`);
+  // Full-region vertical shift
+  if (Math.abs(deltaY) > 6 && Math.abs(deltaX) <= 6) {
+    return refBounds.y < imageHeight * 0.5 ? "margin-top" : "margin-bottom";
+  }
+  // Horizontal shift
+  if (Math.abs(deltaX) > 6 && Math.abs(deltaY) <= 6) {
+    return refBounds.x < imageWidth * 0.5 ? "margin-left" : "margin-right";
+  }
+  return "top";
+}
+
+function buildRelativePositionFix(deltaX: number, deltaY: number, refBounds?: Bounds, imageWidth = 0, imageHeight = 0): string {
+  const suggestions: string[] = [];
+  if (refBounds && imageWidth > 0) {
+    const cssProp = inferPositionCssProperty(deltaX, deltaY, refBounds, imageWidth, imageHeight);
+    if (Math.abs(deltaY) > 6) {
+      const implValue = Math.abs(deltaY);
+      suggestions.push(`Reduce ${cssProp} by ~${implValue}px on the region (y: ${refBounds.y}-${refBounds.y + refBounds.height})`);
+    }
+    if (Math.abs(deltaX) > 6) {
+      const hProp = deltaX > 0 ? "margin-left" : "margin-right";
+      suggestions.push(`Reduce ${hProp} by ~${Math.abs(deltaX)}px`);
+    }
+  } else {
+    if (Math.abs(deltaX) > 6) {
+      suggestions.push(`${deltaX > 0 ? "move it left" : "move it right"} by ${Math.abs(deltaX)}px`);
+    }
+    if (Math.abs(deltaY) > 6) {
+      suggestions.push(`${deltaY > 0 ? "move it up" : "move it down"} by ${Math.abs(deltaY)}px`);
+    }
   }
   return suggestions.join(" and ");
+}
+
+function inferSizeCssProperty(widthDelta: number, heightDelta: number): string {
+  if (Math.abs(widthDelta) > 6 && Math.abs(heightDelta) <= 6) return "width";
+  if (Math.abs(heightDelta) > 6 && Math.abs(widthDelta) <= 6) return heightDelta > 0 ? "height" : "min-height";
+  return "width/height";
 }
 
 function buildRelativeSizeFix(widthDelta: number, heightDelta: number, referenceBounds: Bounds): string {
   const suggestions: string[] = [];
   if (Math.abs(widthDelta) > 6) {
-    suggestions.push(`${widthDelta > 0 ? "narrow it" : "widen it"} by ${Math.abs(widthDelta)}px toward ${referenceBounds.width}px`);
+    suggestions.push(`Set width to ${referenceBounds.width}px (currently ${referenceBounds.width + widthDelta}px)`);
   }
   if (Math.abs(heightDelta) > 6) {
-    suggestions.push(`${heightDelta > 0 ? "reduce its height" : "increase its height"} by ${Math.abs(heightDelta)}px toward ${referenceBounds.height}px`);
+    const prop = heightDelta > 0 ? "height" : "min-height";
+    suggestions.push(`Set ${prop} to ${referenceBounds.height}px (currently ${referenceBounds.height + heightDelta}px)`);
   }
   return suggestions.join(" and ");
 }
 
+function inferSpacingCssProperty(axis: "horizontal" | "vertical", isBetweenSiblings: boolean): string {
+  if (isBetweenSiblings) return "gap";
+  return axis === "vertical" ? "margin-bottom" : "margin-right";
+}
+
 function buildSpacingFix(axis: "horizontal" | "vertical", delta: number, target: number): string {
-  const direction = delta > 0 ? "reduce" : "increase";
-  return `${direction} the ${axis} gap by ${Math.abs(delta)}px so it lands near ${target}px.`;
+  const direction = delta > 0 ? "Reduce" : "Increase";
+  const cssProp = axis === "vertical" ? "gap or margin-bottom" : "gap or margin-right";
+  return `${direction} ${cssProp} by ${Math.abs(delta)}px to ~${target}px.`;
 }
 
 function resolveFocusBounds(
@@ -1248,12 +1379,14 @@ function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[
   estimatedImpact: "low" | "medium" | "high";
 }> {
   // Score each issue by visual weight and severity, pick top 5
+  // Prioritize actionable issues over non-actionable ones
   const scored = issues
     .filter(i => i.suggestedFix)
     .map(i => {
       const severityScore = i.severity === "high" ? 3 : i.severity === "medium" ? 2 : 1;
       const vwScore = (i.visualWeight ?? 0.1) * 10;
-      return { issue: i, score: severityScore + vwScore };
+      const actionableBonus = i.actionable !== false ? 5 : 0;
+      return { issue: i, score: severityScore + vwScore + actionableBonus };
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
@@ -1270,14 +1403,37 @@ function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[
     const impl = i.implementation as any;
 
     switch (i.code) {
-      case "SIZE_MISMATCH":
-        if (ref?.width != null) cssChanges.push(`width: ${ref.width}px; /* content-box */`);
-        if (ref?.height != null) cssChanges.push(`height: ${ref.height}px; /* content-box */`);
+      case "SIZE_MISMATCH": {
+        const sizeProp = i.cssProperty ?? "width/height";
+        if (ref?.width != null && impl?.width != null && Math.abs(impl.width - ref.width) > 6) {
+          cssChanges.push(`width: ${ref.width}px; /* currently ${impl.width}px */`);
+        }
+        if (ref?.height != null && impl?.height != null && Math.abs(impl.height - ref.height) > 6) {
+          const hProp = sizeProp.includes("min-height") ? "min-height" : "height";
+          cssChanges.push(`${hProp}: ${ref.height}px; /* currently ${impl.height}px */`);
+        }
         break;
-      case "POSITION_MISMATCH":
-        if (ref?.x != null) cssChanges.push(`left: ${ref.x}px;`);
-        if (ref?.y != null) cssChanges.push(`top: ${ref.y}px;`);
+      }
+      case "POSITION_MISMATCH": {
+        const posProp = i.cssProperty ?? "top";
+        if (ref && impl) {
+          if (ref.y != null && impl.y != null && Math.abs(impl.y - ref.y) > 6) {
+            cssChanges.push(`${posProp}: /* reduce by ~${Math.abs(impl.y - ref.y)}px */;`);
+          }
+          if (ref.x != null && impl.x != null && Math.abs(impl.x - ref.x) > 6) {
+            const hProp = impl.x > ref.x ? "margin-left" : "margin-right";
+            cssChanges.push(`${hProp}: /* reduce by ~${Math.abs(impl.x - ref.x)}px */;`);
+          }
+        }
         break;
+      }
+      case "SPACING_MISMATCH": {
+        const spaceProp = i.cssProperty ?? "gap";
+        if (ref?.distance != null && impl?.distance != null) {
+          cssChanges.push(`${spaceProp}: ${ref.distance}px; /* currently ~${impl.distance}px */`);
+        }
+        break;
+      }
       case "COLOR_MISMATCH":
       case "COLOR_MISMATCH_AT_POSITION":
         if (ref?.fill) cssChanges.push(`background-color: ${ref.fill};`);

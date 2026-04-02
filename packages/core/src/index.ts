@@ -270,7 +270,9 @@ export const compareIssueSchema = z.object({
   reference: z.unknown().optional(),
   implementation: z.unknown().optional(),
   issueBounds: boundsSchema.optional(),
-  visualWeight: z.number().min(0).max(1).optional()
+  visualWeight: z.number().min(0).max(1).optional(),
+  category: z.enum(["layout", "color", "typography", "content"]).optional(),
+  actionable: z.boolean().optional()
 });
 
 export const compareOptionsSchema = z.object({
@@ -303,6 +305,7 @@ export const compareReportSchema = z.object({
       structuralMismatch: z.number(),
       contentMismatch: z.number(),
       contentRegionCount: z.number().int().nonnegative(),
+      irreducibleEstimate: z.number().min(0).max(1).optional(),
     }).optional(),
   }),
   issues: z.array(compareIssueSchema),
@@ -419,7 +422,8 @@ export const captureOptionsSchema = z.object({
   outputPath: z.string(),
   width: z.number().int().positive().default(1440),
   height: z.number().int().positive().default(1024),
-  deviceScaleFactor: z.number().positive().default(1)
+  deviceScaleFactor: z.number().positive().default(1),
+  skipBlankCheck: z.boolean().optional().default(false)
 }).refine((value) => Boolean(value.url || value.filePath), {
   message: "Either url or filePath is required"
 });

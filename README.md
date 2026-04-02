@@ -22,11 +22,11 @@ npx playwright install chromium
 |---------|---------|-----------|
 | `extract` | Analyze screenshot into layout, color, and text data | `--json`, `--no-ocr`, `--overlay`, `--fine` |
 | `compare` | Pixel + structural diff between two screenshots | `--json`, `--heatmap`, `--dom-diff` |
-| `scaffold` | Generate HTML/CSS or React from a screenshot | `--react`, `--output`, `--mode` |
+| `scaffold` | Generate React+Tailwind (default) or HTML/CSS from a screenshot | `--framework`, `--styling`, `--output` |
 | `tokens` | Extract design tokens (colors, spacing, radii) | `--json` |
 | `plan` | Generate an implementation strategy | `--json` |
 | `capture` | Screenshot a URL or local HTML file | `--url`, `--file`, `--output` |
-| `suggest-fixes` | CSS fix suggestions from a diff | `--json`, `--top`, `--dom-diff` |
+| `suggest-fixes` | Tailwind/CSS fix suggestions from a diff | `--json`, `--top`, `--dom-diff`, `--framework` |
 | `run` | Multi-pass extract→capture→compare→fix loop | `--impl`, `--max-passes`, `--threshold` |
 | `benchmark` | Run benchmark suites | `--json`, `--output` |
 
@@ -36,8 +36,11 @@ npx playwright install chromium
 # Extract structured data from a screenshot
 one-shot-ui extract reference.png --json
 
-# Generate a starter scaffold
-one-shot-ui scaffold reference.png --output ./src --react
+# Generate a React + Tailwind component (default)
+one-shot-ui scaffold reference.png --output ./src
+
+# Or generate vanilla HTML/CSS instead
+one-shot-ui scaffold reference.png --output ./src --framework vanilla --styling css
 
 # Capture your implementation
 one-shot-ui capture --url http://localhost:3000 --output impl.png

@@ -1,8 +1,9 @@
 ---
 name: one-shot-ui
 description: >
-  Extract UI designs from screenshots, generate HTML/CSS scaffolds, and
-  iteratively refine implementations to match a reference image pixel-perfectly.
+  Extract UI designs from screenshots, generate React + Tailwind components
+  (or HTML/CSS), and iteratively refine implementations to match a reference
+  image pixel-perfectly.
 ---
 
 You have access to the `one-shot-ui` CLI tool. Use it to implement UIs from
@@ -25,8 +26,9 @@ Run `one-shot-ui extract <reference.png> --json --overlay` to get:
 - Implementation plan (suggested CSS strategy: grid/flex/absolute)
 
 ### Step 2: Scaffold starter code
-Run `one-shot-ui scaffold <reference.png> --react --output ./src` to generate
-starter HTML/CSS or React components based on the extraction.
+Run `one-shot-ui scaffold <reference.png> --output ./src` to generate a
+React + Tailwind component (the default). For vanilla HTML/CSS instead, add
+`--framework vanilla --styling css`.
 
 ### Step 3: Implement and refine
 Edit the scaffold to match the design. Use the extracted data to set exact:
@@ -46,7 +48,7 @@ Read the heatmap to see where differences are. The JSON report includes:
 
 ### Step 5: Fix issues
 Run `one-shot-ui suggest-fixes <reference.png> impl.png --json` to get specific
-CSS property changes. Apply them and re-compare.
+Tailwind/CSS fix suggestions. Apply them and re-compare.
 
 ### Automated Loop
 For hands-off refinement, use:

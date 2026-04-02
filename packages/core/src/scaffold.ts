@@ -8,11 +8,14 @@ export interface ScaffoldOptions {
 }
 
 export type ScaffoldMode = "absolute" | "structured";
+export type ScaffoldFramework = "react" | "vanilla";
+export type ScaffoldStyling = "tailwind" | "css";
 
 export interface ScaffoldOutput {
   html: string;
   css: string;
   react?: ReactScaffoldOutput;
+  tailwindReact?: TailwindReactScaffoldOutput;
 }
 
 export interface ReactScaffoldOutput {
@@ -30,6 +33,13 @@ export interface ReactComponent {
 export interface ReactFileEntry {
   path: string;
   content: string;
+}
+
+export interface TailwindReactScaffoldOutput {
+  /** Single .tsx file content with Tailwind classes */
+  tsx: string;
+  /** File path for the component (default: Component.tsx) */
+  filePath: string;
 }
 
 /**
@@ -109,7 +119,7 @@ function shouldUseFallback(anchors: SemanticAnchor[], nodes: LayoutNode[]): bool
     .reduce((sum, n) => sum + n.bounds.width * n.bounds.height, 0);
 
   const coverage = totalNodeArea > 0 ? anchoredArea / totalNodeArea : 0;
-  return coverage < 0.35;
+  return coverage < 0.85;
 }
 
 function inferNodeRole(
@@ -141,9 +151,95 @@ function roleToTag(role: string): string {
 }
 
 /**
+ * Cluster adjacent layout nodes into semantic groups by spatial hierarchy.
+ * Groups nodes into bands (header, content rows, footer) and merges
+ * small nodes within the same band. Caps output at maxGroups.
+ */
+function clusterNodesIntoGroups(
+  nodes: LayoutNode[],
+  maxGroups: number = 18
+): Array<{ role: string; tag: string; nodes: LayoutNode[]; bounds: Bounds }> {
+  if (nodes.length === 0) return [];
+
+  const sorted = [...nodes].sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
+  const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
+  const pageHeight = Math.max(1, ...nodes.map(n => n.bounds.y + n.bounds.height));
+
+  // Step 1: Assign each node a semantic role
+  interface TaggedNode { node: LayoutNode; role: string; band: number }
+  const bandHeight = pageHeight / Math.max(1, Math.min(8, Math.ceil(nodes.length / 3)));
+  const tagged: TaggedNode[] = sorted.map(node => {
+    const role = inferNodeRole(node, nodes);
+    const band = Math.floor(node.bounds.y / bandHeight);
+    return { node, role, band };
+  });
+
+  // Step 2: Group nodes that share the same role AND band
+  const groupMap = new Map<string, TaggedNode[]>();
+  for (const t of tagged) {
+    const key = `${t.role}-${t.band}`;
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key)!.push(t);
+  }
+
+  // Step 3: Merge groups into semantic sections with combined bounds
+  let groups = [...groupMap.entries()].map(([key, members]) => {
+    const role = members[0]!.role;
+    const tag = roleToTag(role);
+    const memberNodes = members.map(m => m.node);
+    const bounds: Bounds = {
+      x: Math.min(...memberNodes.map(n => n.bounds.x)),
+      y: Math.min(...memberNodes.map(n => n.bounds.y)),
+      width: Math.max(...memberNodes.map(n => n.bounds.x + n.bounds.width)) - Math.min(...memberNodes.map(n => n.bounds.x)),
+      height: Math.max(...memberNodes.map(n => n.bounds.y + n.bounds.height)) - Math.min(...memberNodes.map(n => n.bounds.y)),
+    };
+    return { role, tag, nodes: memberNodes, bounds };
+  });
+
+  // Sort by vertical position
+  groups.sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
+
+  // Step 4: Cap at maxGroups by merging smallest adjacent groups
+  while (groups.length > maxGroups) {
+    let smallestIdx = 0;
+    let smallestArea = Infinity;
+    for (let i = 0; i < groups.length; i++) {
+      const area = groups[i]!.bounds.width * groups[i]!.bounds.height;
+      if (area < smallestArea) {
+        smallestArea = area;
+        smallestIdx = i;
+      }
+    }
+    // Merge with nearest neighbor (prefer next, fallback to previous)
+    const mergeIdx = smallestIdx < groups.length - 1 ? smallestIdx + 1 : smallestIdx - 1;
+    if (mergeIdx < 0) break;
+    const a = groups[smallestIdx]!;
+    const b = groups[mergeIdx]!;
+    const merged = {
+      role: b.nodes.length >= a.nodes.length ? b.role : a.role,
+      tag: b.nodes.length >= a.nodes.length ? b.tag : a.tag,
+      nodes: [...a.nodes, ...b.nodes],
+      bounds: {
+        x: Math.min(a.bounds.x, b.bounds.x),
+        y: Math.min(a.bounds.y, b.bounds.y),
+        width: Math.max(a.bounds.x + a.bounds.width, b.bounds.x + b.bounds.width) - Math.min(a.bounds.x, b.bounds.x),
+        height: Math.max(a.bounds.y + a.bounds.height, b.bounds.y + b.bounds.height) - Math.min(a.bounds.y, b.bounds.y),
+      },
+    };
+    const lo = Math.min(smallestIdx, mergeIdx);
+    const hi = Math.max(smallestIdx, mergeIdx);
+    groups.splice(hi, 1);
+    groups[lo] = merged;
+  }
+
+  return groups;
+}
+
+/**
  * Generate semantic HTML from raw layout nodes when semantic
  * anchor coverage is too low for the structured scaffold to be useful.
- * Uses flexbox layout, semantic tags, OCR text content, and percentage-based widths.
+ * Clusters nodes into semantic groups (~15-20 elements), uses semantic tags,
+ * flexbox/grid layout, CSS custom properties, and placeholder text content.
  */
 function generateFallbackFromNodes(
   nodes: LayoutNode[],
@@ -153,22 +249,36 @@ function generateFallbackFromNodes(
   let html = "";
   let css = `/* Semantic scaffold from layout detection + OCR */\n`;
 
+  // Emit design tokens as CSS custom properties
+  const colorTokens = tokens.filter(t => t.type === "color");
+  if (colorTokens.length > 0) {
+    css += `:root {\n`;
+    for (const t of colorTokens) {
+      css += `  ${t.name}: ${t.value};\n`;
+    }
+    css += `}\n\n`;
+  }
+
   css += `.page {\n  display: flex;\n  flex-direction: column;\n  width: 100%;\n  min-height: 100vh;\n  box-sizing: border-box;\n}\n\n`;
 
-  const sorted = [...nodes].sort((a, b) => a.bounds.y - b.bounds.y || a.bounds.x - b.bounds.x);
+  const groups = clusterNodesIntoGroups(nodes, 18);
   const placedText = new Set<string>();
   const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
 
-  for (const node of sorted) {
-    const role = inferNodeRole(node, nodes);
-    const tag = roleToTag(role);
-    const className = `${role}-${node.id}`;
-    const containedText = textBlocks.filter(
-      tb => !placedText.has(tb.id) && scaffoldBoundsContain(node.bounds, tb.bounds)
-    );
+  for (let gi = 0; gi < groups.length; gi++) {
+    const group = groups[gi]!;
+    const className = `${group.role}-${gi}`;
 
+    // Find text blocks contained in this group's combined bounds
+    const containedText = textBlocks.filter(
+      tb => !placedText.has(tb.id) && scaffoldBoundsContain(group.bounds, tb.bounds)
+    );
     for (const tb of containedText) placedText.add(tb.id);
     containedText.sort((a, b) => a.bounds.y - b.bounds.y);
+
+    // Check if this group has horizontal children (cards/columns)
+    const hasHorizontalChildren = group.nodes.length > 1 &&
+      group.nodes.some(n => n.bounds.x > group.bounds.x + 20);
 
     let inner = "";
     if (containedText.length > 0) {
@@ -177,53 +287,63 @@ function generateFallbackFromNodes(
         const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
         inner += `      <${textTag}>${escapeHtml(tb.text)}</${textTag}>\n`;
       }
+    } else {
+      // Add placeholder content based on role
+      if (group.role === "header") {
+        inner += `      <h1>Page Title</h1>\n`;
+      } else if (group.role === "footer") {
+        inner += `      <p>Footer content</p>\n`;
+      } else if (group.role === "sidebar") {
+        inner += `      <p>Sidebar navigation</p>\n`;
+      } else if (group.role === "main" || group.role === "section") {
+        if (group.bounds.height > 200) {
+          inner += `      <h2>Section Heading</h2>\n      <p>Content goes here.</p>\n`;
+        }
+      }
     }
 
-    html += `    <${tag} class="${className}" data-node="${node.id}">\n${inner}    </${tag}>\n`;
+    html += `    <${group.tag} class="${className}" data-node="${group.nodes.map(n => n.id).join(",")}">\n${inner}    </${group.tag}>\n`;
 
     css += `.${className} {\n`;
     css += `  box-sizing: border-box;\n`;
 
-    const widthPct = Math.round((node.bounds.width / pageWidth) * 100);
-    if (widthPct >= 95) {
-      css += `  width: 100%;\n`;
-    } else {
-      css += `  width: ${widthPct}%;\n`;
-    }
-
-    css += `  min-height: ${node.bounds.height}px;\n`;
+    const widthPct = Math.round((group.bounds.width / pageWidth) * 100);
+    css += widthPct >= 95 ? `  width: 100%;\n` : `  width: ${widthPct}%;\n`;
+    css += `  min-height: ${group.bounds.height}px;\n`;
 
     if (containedText.length > 0) {
       const firstText = containedText[0]!;
-      const padLeft = Math.max(0, firstText.bounds.x - node.bounds.x);
-      const padTop = Math.max(0, firstText.bounds.y - node.bounds.y);
+      const padLeft = Math.max(0, firstText.bounds.x - group.bounds.x);
+      const padTop = Math.max(0, firstText.bounds.y - group.bounds.y);
       if (padLeft > 4 || padTop > 4) {
         css += `  padding: ${padTop}px ${padLeft}px;\n`;
       }
     }
 
-    if (node.fill) {
-      const colorToken = tokens.find(t => t.type === "color" && String(t.value).toUpperCase() === node.fill?.toUpperCase());
-      css += `  background-color: ${colorToken ? `var(${colorToken.name})` : node.fill};\n`;
+    // Use CSS custom properties for colors instead of inline values
+    const primaryNode = group.nodes.reduce((best, n) =>
+      n.bounds.width * n.bounds.height > best.bounds.width * best.bounds.height ? n : best,
+      group.nodes[0]!
+    );
+
+    if (primaryNode.fill) {
+      const colorToken = tokens.find(t => t.type === "color" && String(t.value).toUpperCase() === primaryNode.fill?.toUpperCase());
+      css += `  background-color: ${colorToken ? `var(${colorToken.name})` : primaryNode.fill};\n`;
     }
 
-    if (node.borderRadius && node.borderRadius > 0) {
-      const radiusToken = tokens.find(t => t.type === "radius" && t.value === `${node.borderRadius}px`);
-      css += `  border-radius: ${radiusToken ? `var(${radiusToken.name})` : `${node.borderRadius}px`};\n`;
+    if (primaryNode.borderRadius && primaryNode.borderRadius > 0) {
+      const radiusToken = tokens.find(t => t.type === "radius" && t.value === `${primaryNode.borderRadius}px`);
+      css += `  border-radius: ${radiusToken ? `var(${radiusToken.name})` : `${primaryNode.borderRadius}px`};\n`;
       css += `  overflow: hidden;\n`;
     }
 
-    if (node.shadow) {
-      css += `  box-shadow: ${node.shadow.xOffset}px ${node.shadow.yOffset}px ${node.shadow.blurRadius}px ${node.shadow.spread}px ${node.shadow.color};\n`;
+    if (primaryNode.shadow) {
+      css += `  box-shadow: ${primaryNode.shadow.xOffset}px ${primaryNode.shadow.yOffset}px ${primaryNode.shadow.blurRadius}px ${primaryNode.shadow.spread}px ${primaryNode.shadow.color};\n`;
     }
 
-    if (node.gradient) {
-      const stops = node.gradient.stops.map((s: any) => `${s.color} ${Math.round(s.position * 100)}%`).join(", ");
-      if (node.gradient.type === "linear") {
-        css += `  background: linear-gradient(${node.gradient.angle}deg, ${stops});\n`;
-      } else {
-        css += `  background: radial-gradient(${stops});\n`;
-      }
+    // Use flex layout for groups with horizontal children
+    if (hasHorizontalChildren) {
+      css += `  display: flex;\n  flex-wrap: wrap;\n  gap: 16px;\n`;
     }
 
     css += `}\n\n`;
@@ -538,7 +658,414 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// --- React scaffold generation ---
+// --- Tailwind + React scaffold generation ---
+
+/**
+ * Generate a single React (.tsx) component with Tailwind CSS classes.
+ * This is the preferred output format — modern frameworks produce
+ * dramatically better results than raw HTML/CSS.
+ */
+export function generateTailwindReactScaffold(
+  plan: ImplementationPlan,
+  anchors: SemanticAnchor[],
+  tokens: DesignToken[],
+  nodes: LayoutNode[],
+  textBlocks: TextBlock[],
+  components: Array<{ id: string; memberIds: string[]; signature: any }>
+): TailwindReactScaffoldOutput {
+  const useFallback = shouldUseFallback(anchors, nodes);
+
+  let bodyJsx: string;
+  if (useFallback) {
+    bodyJsx = generateTailwindFallbackJsx(nodes, textBlocks, tokens, 3);
+  } else {
+    const rootAnchors = anchors.filter(a => a.parentId === null);
+    bodyJsx = rootAnchors
+      .map(a => generateTailwindAnchorJsx(a, anchors, nodes, textBlocks, tokens, plan, 3))
+      .join("\n");
+  }
+
+  const tsx = `import React from "react";
+
+export default function Page() {
+  return (
+    <div className="${tailwindPageClasses(plan)}">
+${bodyJsx}
+    </div>
+  );
+}
+`;
+
+  return { tsx, filePath: "Page.tsx" };
+}
+
+function tailwindPageClasses(plan: ImplementationPlan): string {
+  const classes = ["min-h-screen", "w-full"];
+  if (plan.page.primaryStrategy === "flex") {
+    classes.push("flex", "flex-col");
+  } else if (plan.page.primaryStrategy === "grid") {
+    classes.push("grid");
+  } else {
+    classes.push("relative");
+  }
+  return classes.join(" ");
+}
+
+function generateTailwindFallbackJsx(
+  nodes: LayoutNode[],
+  textBlocks: TextBlock[],
+  tokens: DesignToken[],
+  indent: number
+): string {
+  const groups = clusterNodesIntoGroups(nodes, 18);
+  const placedText = new Set<string>();
+  const pageWidth = Math.max(1, ...nodes.map(n => n.bounds.x + n.bounds.width));
+  const lines: string[] = [];
+  const pad = "  ".repeat(indent);
+
+  for (const group of groups) {
+    const tag = tailwindRoleToTag(group.role);
+    // Build classes from the largest node in the group (representative styling)
+    const primaryNode = group.nodes.reduce((best, n) =>
+      n.bounds.width * n.bounds.height > best.bounds.width * best.bounds.height ? n : best,
+      group.nodes[0]!
+    );
+    const classes = buildTailwindClasses(primaryNode, pageWidth, tokens);
+
+    // Check if this group has horizontal children
+    const hasHorizontalChildren = group.nodes.length > 1 &&
+      group.nodes.some(n => n.bounds.x > group.bounds.x + 20);
+    const layoutClasses = hasHorizontalChildren ? `${classes} flex flex-wrap gap-4` : classes;
+
+    const containedText = textBlocks.filter(
+      tb => !placedText.has(tb.id) && scaffoldBoundsContain(group.bounds, tb.bounds)
+    );
+    for (const tb of containedText) placedText.add(tb.id);
+    containedText.sort((a, b) => a.bounds.y - b.bounds.y);
+
+    if (containedText.length > 0) {
+      lines.push(`${pad}<${tag} className="${layoutClasses}">`);
+      for (const tb of containedText) {
+        const fontSize = tb.typography?.fontSize ?? 0;
+        const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
+        const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight);
+        lines.push(`${pad}  <${textTag} className="${textClasses}">${escapeJsx(tb.text)}</${textTag}>`);
+      }
+      lines.push(`${pad}</${tag}>`);
+    } else {
+      // Add placeholder content for empty semantic groups
+      if (group.role === "header" || group.role === "footer" || (group.role === "main" && group.bounds.height > 200)) {
+        const placeholderTag = group.role === "header" ? "h1" : group.role === "main" ? "h2" : "p";
+        const placeholderText = group.role === "header" ? "Page Title" : group.role === "footer" ? "Footer content" : "Section Heading";
+        const textClasses = tailwindTextClasses(group.role === "header" ? 28 : 16);
+        lines.push(`${pad}<${tag} className="${layoutClasses}">`);
+        lines.push(`${pad}  <${placeholderTag} className="${textClasses}">${placeholderText}</${placeholderTag}>`);
+        lines.push(`${pad}</${tag}>`);
+      } else {
+        lines.push(`${pad}<${tag} className="${layoutClasses}" />`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function generateTailwindAnchorJsx(
+  anchor: SemanticAnchor,
+  allAnchors: SemanticAnchor[],
+  nodes: LayoutNode[],
+  textBlocks: TextBlock[],
+  tokens: DesignToken[],
+  plan: ImplementationPlan,
+  indent: number
+): string {
+  const pad = "  ".repeat(indent);
+  const tag = tailwindRoleToTag(anchor.role);
+  const node = nodes.find(n => n.id === anchor.nodeId);
+  const children = allAnchors.filter(a => a.parentId === anchor.id);
+  const containedText = textBlocks.filter(tb => scaffoldBoundsContain(anchor.bounds, tb.bounds));
+  const planNode = plan.nodes.find(n => n.id === anchor.id);
+
+  const classes = buildTailwindAnchorClasses(anchor, node, children, planNode, allAnchors, tokens);
+
+  if (children.length === 0 && containedText.length === 0) {
+    // Special role placeholders
+    if (anchor.role === "chart") {
+      return `${pad}<${tag} className="${classes}">\n${pad}  <div className="w-full h-full bg-gradient-to-br from-slate-200 to-slate-300 flex items-center justify-center text-slate-500 text-sm">Chart</div>\n${pad}</${tag}>`;
+    }
+    if (anchor.role === "avatar") {
+      return `${pad}<${tag} className="${classes}">\n${pad}  <div className="w-full h-full rounded-full bg-slate-400" />\n${pad}</${tag}>`;
+    }
+    return `${pad}<${tag} className="${classes}" />`;
+  }
+
+  let content = `${pad}<${tag} className="${classes}">`;
+
+  if (children.length > 0) {
+    content += "\n";
+    for (const child of children) {
+      content += generateTailwindAnchorJsx(child, allAnchors, nodes, textBlocks, tokens, plan, indent + 1) + "\n";
+    }
+    content += `${pad}</${tag}>`;
+  } else {
+    content += "\n";
+    for (const tb of containedText) {
+      const fontSize = tb.typography?.fontSize ?? 0;
+      const textTag = fontSize >= 28 ? "h1" : fontSize >= 20 ? "h2" : "p";
+      const textClasses = tailwindTextClasses(fontSize, tb.typography?.fontWeight);
+      content += `${pad}  <${textTag} className="${textClasses}">${escapeJsx(tb.text)}</${textTag}>\n`;
+    }
+    content += `${pad}</${tag}>`;
+  }
+
+  return content;
+}
+
+function buildTailwindClasses(node: LayoutNode, pageWidth: number, tokens: DesignToken[]): string {
+  const classes: string[] = ["box-border"];
+  const widthPct = Math.round((node.bounds.width / pageWidth) * 100);
+  classes.push(widthPct >= 95 ? "w-full" : `w-[${widthPct}%]`);
+  classes.push(`min-h-[${node.bounds.height}px]`);
+
+  if (node.fill) {
+    classes.push(cssColorToTailwind("bg", node.fill));
+  }
+  if (node.borderRadius && node.borderRadius > 0) {
+    classes.push(cssRadiusToTailwind(node.borderRadius));
+    classes.push("overflow-hidden");
+  }
+  if (node.shadow) {
+    classes.push(cssShadowToTailwind(node.shadow));
+  }
+  if (node.gradient) {
+    classes.push(...cssGradientToTailwind(node.gradient));
+  }
+
+  return classes.join(" ");
+}
+
+function buildTailwindAnchorClasses(
+  anchor: SemanticAnchor,
+  node: LayoutNode | undefined,
+  children: SemanticAnchor[],
+  planNode: ImplementationPlan["nodes"][number] | undefined,
+  allAnchors: SemanticAnchor[],
+  tokens: DesignToken[]
+): string {
+  const classes: string[] = [];
+
+  // Width
+  if (anchor.parentId === null) {
+    const pageWidth = Math.max(1, ...allAnchors.filter(a => a.parentId === null).map(a => a.bounds.x + a.bounds.width));
+    const widthPct = Math.round((anchor.bounds.width / pageWidth) * 100);
+    classes.push(widthPct >= 95 ? "w-full" : `w-[${widthPct}%]`);
+  } else {
+    const parent = allAnchors.find(a => a.id === anchor.parentId);
+    if (parent) {
+      const widthPct = Math.round((anchor.bounds.width / Math.max(1, parent.bounds.width)) * 100);
+      classes.push(widthPct >= 95 ? "w-full" : `w-[${widthPct}%]`);
+    }
+  }
+
+  classes.push(`min-h-[${anchor.bounds.height}px]`);
+
+  // Fill
+  if (node?.fill) {
+    classes.push(cssColorToTailwind("bg", node.fill));
+  }
+
+  // Border radius
+  if (node?.borderRadius && node.borderRadius > 0) {
+    classes.push(cssRadiusToTailwind(node.borderRadius));
+    classes.push("overflow-hidden");
+  }
+  if (anchor.role === "avatar") {
+    classes.push("rounded-full", "overflow-hidden");
+  }
+  if (anchor.role === "chart") {
+    classes.push("overflow-hidden", "relative");
+  }
+
+  // Shadow
+  if (node?.shadow) {
+    classes.push(cssShadowToTailwind(node.shadow));
+  }
+
+  // Gradient
+  if (node?.gradient) {
+    classes.push(...cssGradientToTailwind(node.gradient));
+  }
+
+  // Layout for children
+  if (children.length > 0) {
+    const { gap, direction } = inferGap(children);
+    const padding = inferPadding(anchor, children);
+
+    if (planNode?.strategy === "grid") {
+      classes.push("grid");
+    } else {
+      classes.push("flex");
+      classes.push(direction === "row" ? "flex-row" : "flex-col");
+      classes.push("items-center");
+    }
+
+    if (gap > 0) {
+      classes.push(cssGapToTailwind(gap));
+    }
+
+    if (padding.top > 2 || padding.right > 2 || padding.bottom > 2 || padding.left > 2) {
+      classes.push(...cssPaddingToTailwind(padding));
+    }
+  }
+
+  return classes.join(" ");
+}
+
+// --- Tailwind utility mappers ---
+
+function cssColorToTailwind(prefix: string, hex: string): string {
+  // Use arbitrary value for exact color matching
+  return `${prefix}-[${hex.toLowerCase()}]`;
+}
+
+function cssRadiusToTailwind(px: number): string {
+  if (px <= 2) return "rounded-sm";
+  if (px <= 4) return "rounded";
+  if (px <= 6) return "rounded-md";
+  if (px <= 8) return "rounded-lg";
+  if (px <= 12) return "rounded-xl";
+  if (px <= 16) return "rounded-2xl";
+  if (px >= 9999) return "rounded-full";
+  return `rounded-[${px}px]`;
+}
+
+function cssShadowToTailwind(shadow: { xOffset: number; yOffset: number; blurRadius: number; spread: number; color: string }): string {
+  const { xOffset, yOffset, blurRadius, spread, color } = shadow;
+  return `shadow-[${xOffset}px_${yOffset}px_${blurRadius}px_${spread}px_${color.replace(/ /g, "_")}]`;
+}
+
+function cssGradientToTailwind(gradient: { type: string; angle: number | null; stops: Array<{ color: string; position: number }> }): string[] {
+  if (gradient.type === "linear" && gradient.stops.length >= 2) {
+    const from = gradient.stops[0]!;
+    const to = gradient.stops[gradient.stops.length - 1]!;
+    return [
+      "bg-gradient-to-br",
+      `from-[${from.color.toLowerCase()}]`,
+      `to-[${to.color.toLowerCase()}]`
+    ];
+  }
+  return [`bg-[radial-gradient(${gradient.stops.map(s => `${s.color}_${Math.round(s.position * 100)}%`).join(",_")})]`];
+}
+
+function cssGapToTailwind(px: number): string {
+  const scale: Record<number, string> = { 0: "0", 1: "px", 2: "0.5", 4: "1", 8: "2", 12: "3", 16: "4", 20: "5", 24: "6", 32: "8", 40: "10", 48: "12" };
+  const nearest = Object.keys(scale).map(Number).reduce((prev, curr) =>
+    Math.abs(curr - px) < Math.abs(prev - px) ? curr : prev
+  );
+  if (Math.abs(nearest - px) <= 2) {
+    return `gap-${scale[nearest]}`;
+  }
+  return `gap-[${px}px]`;
+}
+
+function cssPaddingToTailwind(p: { top: number; right: number; bottom: number; left: number }): string[] {
+  const classes: string[] = [];
+  if (p.top > 2) classes.push(`pt-[${p.top}px]`);
+  if (p.right > 2) classes.push(`pr-[${p.right}px]`);
+  if (p.bottom > 2) classes.push(`pb-[${p.bottom}px]`);
+  if (p.left > 2) classes.push(`pl-[${p.left}px]`);
+  return classes;
+}
+
+function tailwindTextClasses(fontSize: number, fontWeight?: number): string {
+  const classes: string[] = [];
+  if (fontSize >= 36) classes.push("text-4xl");
+  else if (fontSize >= 30) classes.push("text-3xl");
+  else if (fontSize >= 24) classes.push("text-2xl");
+  else if (fontSize >= 20) classes.push("text-xl");
+  else if (fontSize >= 18) classes.push("text-lg");
+  else if (fontSize >= 16) classes.push("text-base");
+  else if (fontSize >= 14) classes.push("text-sm");
+  else classes.push("text-xs");
+
+  if (fontWeight && fontWeight >= 700) classes.push("font-bold");
+  else if (fontWeight && fontWeight >= 600) classes.push("font-semibold");
+  else if (fontWeight && fontWeight >= 500) classes.push("font-medium");
+
+  return classes.join(" ");
+}
+
+function tailwindRoleToTag(role: string): string {
+  switch (role) {
+    case "header": return "header";
+    case "footer": return "footer";
+    case "navigation": case "sidebar": return "nav";
+    case "main": return "main";
+    default: return "div";
+  }
+}
+
+function escapeJsx(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
+}
+
+/**
+ * Convert a CSS property + value pair into a Tailwind class suggestion.
+ * Used by suggest-fixes to emit Tailwind-native guidance.
+ */
+export function cssToTailwindClass(property: string, value: string): string {
+  const v = value.trim();
+  const px = Number.parseInt(v);
+
+  switch (property) {
+    case "background-color":
+      return `bg-[${v}]`;
+    case "width":
+      return Number.isNaN(px) ? `w-[${v}]` : `w-[${px}px]`;
+    case "height":
+      return Number.isNaN(px) ? `h-[${v}]` : `h-[${px}px]`;
+    case "min-height":
+      return Number.isNaN(px) ? `min-h-[${v}]` : `min-h-[${px}px]`;
+    case "padding":
+      return Number.isNaN(px) ? `p-[${v}]` : `p-[${px}px]`;
+    case "padding-top":
+      return Number.isNaN(px) ? `pt-[${v}]` : `pt-[${px}px]`;
+    case "padding-right":
+      return Number.isNaN(px) ? `pr-[${v}]` : `pr-[${px}px]`;
+    case "padding-bottom":
+      return Number.isNaN(px) ? `pb-[${v}]` : `pb-[${px}px]`;
+    case "padding-left":
+      return Number.isNaN(px) ? `pl-[${v}]` : `pl-[${px}px]`;
+    case "margin":
+      return Number.isNaN(px) ? `m-[${v}]` : `m-[${px}px]`;
+    case "gap":
+      return cssGapToTailwind(Number.isNaN(px) ? 0 : px);
+    case "border-radius":
+      return cssRadiusToTailwind(Number.isNaN(px) ? 0 : px);
+    case "font-size":
+      return Number.isNaN(px) ? `text-[${v}]` : `text-[${px}px]`;
+    case "font-weight": {
+      const w = Number.parseInt(v);
+      if (w >= 700) return "font-bold";
+      if (w >= 600) return "font-semibold";
+      if (w >= 500) return "font-medium";
+      if (w >= 400) return "font-normal";
+      return `font-[${v}]`;
+    }
+    case "font-family":
+      return v.includes("serif") && !v.includes("sans") ? "font-serif" : "font-sans";
+    case "box-shadow":
+      return v === "none" ? "shadow-none" : `shadow-[${v.replace(/ /g, "_")}]`;
+    case "left":
+      return Number.isNaN(px) ? `left-[${v}]` : `left-[${px}px]`;
+    case "top":
+      return Number.isNaN(px) ? `top-[${v}]` : `top-[${px}px]`;
+    default:
+      return `[${property}:${v}]`;
+  }
+}
+
+// --- React scaffold generation (CSS modules, legacy) ---
 
 function buildComponentTree(
   anchors: SemanticAnchor[],

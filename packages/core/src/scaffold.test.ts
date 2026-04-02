@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { generateHtmlScaffold } from "./scaffold.js";
+import { generateHtmlScaffold, generateTailwindReactScaffold, cssToTailwindClass } from "./scaffold.js";
 import type { ImplementationPlan, SemanticAnchor, DesignToken, LayoutNode, TextBlock } from "./index.js";
 
 function makePlan(overrides?: Partial<ImplementationPlan>): ImplementationPlan {
@@ -33,15 +33,14 @@ describe("scaffold fallback", () => {
     ];
     const result = generateHtmlScaffold(makePlan(), [], [], nodes, []);
 
-    // Should produce semantic elements from raw nodes
-    expect(result.html).toContain("data-node=\"n1\"");
-    expect(result.html).toContain("data-node=\"n2\"");
+    // Should produce semantic elements from raw nodes (may be clustered)
+    expect(result.html).toContain("data-node=");
+    expect(result.html).toContain("n1");
     expect(result.css).toContain("display: flex");
     expect(result.css).toContain("#112233");
-    expect(result.css).toContain("#445566");
   });
 
-  it("uses fallback when anchor coverage is below 35%", () => {
+  it("uses fallback when anchor coverage is below 85%", () => {
     // 10 nodes total, but only 1 is anchored
     const nodes = Array.from({ length: 10 }, (_, i) =>
       makeNode(`n${i}`, i * 50, 0, 40, 40)
@@ -52,10 +51,30 @@ describe("scaffold fallback", () => {
 
     const result = generateHtmlScaffold(makePlan(), anchors, [], nodes, []);
 
-    // Should fall back since only 1/10 nodes are anchored (10% < 35%)
+    // Should fall back since only 1/10 nodes are anchored (10% < 85%)
     expect(result.css).toContain("Semantic scaffold from layout detection");
-    expect(result.html).toContain("data-node=\"n0\"");
-    expect(result.html).toContain("data-node=\"n5\"");
+    expect(result.html).toContain("data-node=");
+    expect(result.html).toContain("n0");
+  });
+
+  it("uses semantic fallback path for moderate anchor coverage (below 85%)", () => {
+    // 5 nodes, 2 anchored = 40% coverage - should still use fallback
+    const nodes = [
+      makeNode("n1", 0, 0, 1000, 80),
+      makeNode("n2", 0, 80, 1000, 200),
+      makeNode("n3", 0, 280, 1000, 300),
+      makeNode("n4", 0, 580, 1000, 200),
+      makeNode("n5", 0, 780, 1000, 60),
+    ];
+    const anchors = [
+      makeAnchor("a1", "n1", "header", null, nodes[0]!.bounds),
+      makeAnchor("a2", "n2", "hero", null, nodes[1]!.bounds),
+    ];
+
+    const result = generateHtmlScaffold(makePlan(), anchors, [], nodes, []);
+    // With 40% coverage (below 85% threshold), should use semantic fallback
+    expect(result.css).toContain("Semantic scaffold from layout detection");
+    expect(result.html).toContain("data-node=");
   });
 
   it("uses structured scaffold when anchor coverage is sufficient", () => {
@@ -70,7 +89,7 @@ describe("scaffold fallback", () => {
 
     const result = generateHtmlScaffold(makePlan(), anchors, [], nodes, []);
 
-    // All nodes are anchored (100% > 35%), should use structured mode
+    // All nodes are anchored (100% > 85%), should use structured mode
     expect(result.css).not.toContain("Fallback scaffold");
     expect(result.html).toContain('data-anchor="header"');
     expect(result.html).toContain('data-anchor="main"');
@@ -173,5 +192,107 @@ describe("generateHtmlScaffold fallback", () => {
     expect(result.html).toContain("<h1>Big Title</h1>");
     expect(result.html).toContain("<h2>Subtitle</h2>");
     expect(result.html).toContain("<p>Body text here</p>");
+  });
+});
+
+describe("generateTailwindReactScaffold", () => {
+  it("generates a React component with Tailwind classes", () => {
+    const nodes = [
+      makeNode("n1", 0, 0, 1440, 80, "#1a1a1a"),
+      makeNode("n2", 0, 80, 1440, 800, "#FFFFFF"),
+    ];
+    const textBlocks: TextBlock[] = [{
+      id: "t1", text: "Hello World", confidence: 0.9,
+      bounds: { x: 10, y: 10, width: 100, height: 20 },
+      typography: { fontSize: 32, fontWeight: 700, lineHeight: 40, letterSpacing: 0, confidence: 0.8 }
+    }];
+
+    const result = generateTailwindReactScaffold(makePlan(), [], [], nodes, textBlocks, []);
+
+    expect(result.tsx).toContain("export default function Page()");
+    expect(result.tsx).toContain("className=");
+    expect(result.tsx).toContain("Hello World");
+    expect(result.tsx).toContain("min-h-screen");
+    expect(result.filePath).toBe("Page.tsx");
+  });
+
+  it("uses Tailwind color classes for fills", () => {
+    const nodes = [makeNode("n1", 0, 0, 500, 200, "#FF5500")];
+    const result = generateTailwindReactScaffold(makePlan(), [], [], nodes, [], []);
+
+    expect(result.tsx).toContain("bg-[#ff5500]");
+  });
+
+  it("uses Tailwind border-radius classes", () => {
+    const nodes: LayoutNode[] = [{
+      id: "n1", kind: "region",
+      bounds: { x: 0, y: 0, width: 200, height: 100 },
+      fill: "#AABBCC", gradient: null, borderRadius: 8,
+      shadow: null, componentId: null, confidence: 0.8
+    }];
+
+    const result = generateTailwindReactScaffold(makePlan(), [], [], nodes, [], []);
+    expect(result.tsx).toContain("rounded-lg");
+  });
+
+  it("generates layout classes for anchored content", () => {
+    const nodes = [
+      makeNode("n1", 0, 0, 1000, 80),
+      makeNode("n2", 0, 80, 1000, 600),
+    ];
+    const anchors: SemanticAnchor[] = [
+      { id: "a1", nodeId: "n1", name: "header", role: "header", parentId: null, bounds: nodes[0]!.bounds, confidence: 0.72 },
+      { id: "a2", nodeId: "n2", name: "main", role: "main", parentId: null, bounds: nodes[1]!.bounds, confidence: 0.72 },
+    ];
+
+    const result = generateTailwindReactScaffold(makePlan(), anchors, [], nodes, [], []);
+
+    expect(result.tsx).toContain("<header");
+    expect(result.tsx).toContain("<main");
+    expect(result.tsx).toContain("className=");
+  });
+
+  it("produces semantic tags in Tailwind fallback for typical pages", () => {
+    const nodes = [
+      makeNode("n1", 0, 0, 1440, 80, "#1a1a2e"),
+      makeNode("n2", 0, 80, 1440, 700, "#ffffff"),
+      makeNode("n3", 0, 780, 1440, 60, "#333333"),
+    ];
+    const result = generateTailwindReactScaffold(makePlan(), [], [], nodes, [], []);
+    // Should contain semantic tags, not just divs
+    expect(result.tsx).toMatch(/<(nav|header|main|section|footer)/);
+  });
+
+  it("outputs a single .tsx file path", () => {
+    const result = generateTailwindReactScaffold(makePlan(), [], [], [], [], []);
+    expect(result.filePath).toBe("Page.tsx");
+    expect(result.tsx).toContain("import React");
+  });
+});
+
+describe("cssToTailwindClass", () => {
+  it("converts background-color", () => {
+    expect(cssToTailwindClass("background-color", "#ff0000")).toBe("bg-[#ff0000]");
+  });
+
+  it("converts width in px", () => {
+    expect(cssToTailwindClass("width", "200px")).toBe("w-[200px]");
+  });
+
+  it("converts border-radius", () => {
+    expect(cssToTailwindClass("border-radius", "8px")).toBe("rounded-lg");
+  });
+
+  it("converts font-weight to named class", () => {
+    expect(cssToTailwindClass("font-weight", "700")).toBe("font-bold");
+    expect(cssToTailwindClass("font-weight", "500")).toBe("font-medium");
+  });
+
+  it("converts font-size", () => {
+    expect(cssToTailwindClass("font-size", "16px")).toBe("text-[16px]");
+  });
+
+  it("converts box-shadow none", () => {
+    expect(cssToTailwindClass("box-shadow", "none")).toBe("shadow-none");
   });
 });

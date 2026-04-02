@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { dirname, resolve } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, stat, rm } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { Command } from "commander";
 
@@ -27,7 +27,7 @@ import {
   type LayoutNode
 } from "@one-shot-ui/core";
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
-import { captureScreenshot } from "@one-shot-ui/browser-capture";
+import { captureScreenshot, BlankCaptureError } from "@one-shot-ui/browser-capture";
 import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
@@ -42,21 +42,63 @@ program.name("one-shot-ui").description("Deterministic UI extraction and diff to
 
 program
   .command("extract")
-  .argument("<imagePath>", "Path to the reference screenshot")
+  .argument("[imagePath]", "Path to the reference screenshot")
+  .option("--image <path>", "Path to the reference screenshot (alternative to positional argument)")
   .option("--json", "Print full JSON report", false)
+  .option("--compact", "Output compact, actionable layout summary (default: true)", true)
+  .option("--no-compact", "Output full detailed report")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--label", "Enable semantic node labeling (heuristic; provide adapter for LLM)", false)
   .option("--overlay", "Include structured overlay annotations for LLM vision cross-referencing", false)
   .option("--fine", "Use fine-grained (4px) layout detection for small details", false)
   .action(async (imagePath, options) => {
-    const report = await extractImageReport(imagePath, {
+    const resolvedImagePath = imagePath ?? options.image;
+    if (!resolvedImagePath) {
+      console.error("Error: missing image path. Usage:\n  one-shot-ui extract <imagePath>\n  one-shot-ui extract --image <path>");
+      process.exit(1);
+    }
+    const report = await extractImageReport(resolvedImagePath, {
       disableOcr: options.ocr === false,
       enableLabeling: options.label,
       enableOverlay: options.overlay,
       fineGrid: options.fine
     });
+
+    if (options.json && options.compact) {
+      // Compact JSON: summarized, ≤200 lines
+      const compact = buildCompactExtract(report);
+      console.log(JSON.stringify(compact, null, 2));
+      return;
+    }
+
     if (options.json) {
       console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    if (options.compact) {
+      // Compact text output
+      const compact = buildCompactExtract(report);
+      console.log(`Image: ${compact.image.width}x${compact.image.height}`);
+      console.log(`Background: ${compact.background}`);
+      console.log(`\nColors (${compact.colors.length}):`);
+      for (const c of compact.colors) {
+        console.log(`  ${c.hex} — ${(c.frequency * 100).toFixed(1)}%`);
+      }
+      if (compact.fontSizes.length) {
+        console.log(`\nFont sizes: ${compact.fontSizes.map(f => `${f.size}px (${f.count}x)`).join(", ")}`);
+      }
+      if (compact.layoutStrategy) {
+        console.log(`\nLayout: ${compact.layoutStrategy.type} (${(compact.layoutStrategy.confidence * 100).toFixed(0)}% confidence)`);
+      }
+      if (compact.gridStructure) {
+        console.log(`Grid: ${compact.gridStructure.columns} columns, ${compact.gridStructure.rows} rows`);
+      }
+      console.log(`\nRegions (${compact.regions.length}):`);
+      for (const r of compact.regions) {
+        const text = r.textPreview ? ` — "${r.textPreview}"` : "";
+        console.log(`  ${r.role} ${r.width}x${r.height} at (${r.x}, ${r.y})${text}`);
+      }
       return;
     }
 
@@ -84,8 +126,27 @@ program
   .option("--region <anchorName>", "Compare only a named semantic anchor from the reference image")
   .option("--crop <x,y,width,height>", "Compare only a cropped rectangle")
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
+  .option("--auto-resize", "Auto-resize the implementation screenshot to match reference dimensions before comparing", false)
+  .option("--previous-mismatch <ratios>", "Comma-separated previous mismatch ratios (e.g. '0.15,0.10') for regression/plateau detection")
   .option("--summary", "Print a single human-readable summary line", false)
+  .option("--top-fixes <n>", "Print N highest-impact actionable fixes as plain text", "0")
   .action(async (referencePath, implementationPath, options) => {
+    // Auto-resize: if enabled, check dimensions and resize implementation to match reference
+    let effectiveImplPath = implementationPath;
+    if (options.autoResize) {
+      const refDims = await readImageDimensions(resolve(referencePath));
+      const implDims = await readImageDimensions(resolve(implementationPath));
+      if (refDims.width !== implDims.width || refDims.height !== implDims.height) {
+        const sharp = (await import("sharp")).default;
+        const resizedPath = implementationPath.replace(/(\.\w+)$/, `-resized$1`);
+        await sharp(resolve(implementationPath))
+          .resize(refDims.width, refDims.height, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
+          .toFile(resolve(resizedPath));
+        console.log(`⚠ Auto-resized implementation from ${implDims.width}x${implDims.height} to ${refDims.width}x${refDims.height} (saved to ${resizedPath})`);
+        effectiveImplPath = resizedPath;
+      }
+    }
+
     const compareOpts: CompareImagesOptions = {
       heatmapPath: options.heatmap,
       top: Number.parseInt(options.top, 10),
@@ -94,7 +155,7 @@ program
       crop: parseCropBounds(options.crop)
     };
 
-    const report = await compareImages(referencePath, implementationPath, compareOpts);
+    const report = await compareImages(referencePath, effectiveImplPath, compareOpts);
 
     // DOM-level comparison if requested
     if (options.domDiff) {
@@ -115,6 +176,41 @@ program
       }
     }
 
+    // Regression and plateau detection from previous mismatch ratios
+    const regressionInfo: { regressionWarning?: string; regressionDelta?: number; plateauDetected?: boolean; plateauBreakdown?: string } = {};
+    if (options.previousMismatch) {
+      const previousRatios = options.previousMismatch
+        .split(",")
+        .map((s: string) => Number.parseFloat(s.trim()))
+        .filter((n: number) => !Number.isNaN(n));
+      const currentRatio = report.summary.mismatchRatio;
+
+      if (previousRatios.length > 0) {
+        const lastRatio = previousRatios[previousRatios.length - 1]!;
+        // Regression: current is worse than last pass
+        if (currentRatio > lastRatio) {
+          const delta = currentRatio - lastRatio;
+          regressionInfo.regressionWarning = `Mismatch increased by ${(delta * 100).toFixed(2)}pp (${(lastRatio * 100).toFixed(2)}% → ${(currentRatio * 100).toFixed(2)}%). Consider reverting the last change.`;
+          regressionInfo.regressionDelta = delta;
+        }
+      }
+
+      // Plateau: last 2+ previous ratios + current are within 0.5% of each other
+      const allRatios = [...previousRatios, currentRatio];
+      if (allRatios.length >= 3) {
+        const recent = allRatios.slice(-3);
+        const maxR = Math.max(...recent);
+        const minR = Math.min(...recent);
+        if ((maxR - minR) < 0.005) {
+          regressionInfo.plateauDetected = true;
+          const seg = report.summary.segmented;
+          regressionInfo.plateauBreakdown = seg
+            ? `Structural: ${(seg.structuralMismatch * 100).toFixed(2)}%, Content: ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`
+            : `Remaining mismatch: ${(currentRatio * 100).toFixed(2)}% (no segmented breakdown available)`;
+        }
+      }
+    }
+
     if (options.summary) {
       const ratio = (report.summary.mismatchRatio * 100).toFixed(1);
       const dimStatus = report.issues.find(i => i.code === "DIMENSION_MISMATCH") ? "MISMATCH" : "OK";
@@ -126,13 +222,33 @@ program
       const segInfo = report.summary.segmented
         ? ` | Structural: ${(report.summary.segmented.structuralMismatch * 100).toFixed(1)}%`
         : "";
-      console.log(`Mismatch: ${ratio}% | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`);
+      let summaryLine = `Mismatch: ${ratio}% | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`;
+      if (regressionInfo.regressionWarning) {
+        summaryLine += ` | REGRESSION_WARNING: ${regressionInfo.regressionWarning}`;
+      }
+      if (regressionInfo.plateauDetected) {
+        summaryLine += ` | PLATEAU_DETECTED: ${regressionInfo.plateauBreakdown}`;
+      }
+      console.log(summaryLine);
       return;
     }
 
     if (options.json) {
-      console.log(JSON.stringify(report, null, 2));
+      const output: any = { ...report };
+      if (regressionInfo.regressionWarning || regressionInfo.plateauDetected) {
+        output.regressionDetection = regressionInfo;
+      }
+      console.log(JSON.stringify(output, null, 2));
       return;
+    }
+
+    // Surface regression/plateau warnings before other output
+    if (regressionInfo.regressionWarning) {
+      console.log(`⚠ REGRESSION_WARNING: ${regressionInfo.regressionWarning}`);
+    }
+    if (regressionInfo.plateauDetected) {
+      console.log(`⚠ PLATEAU_DETECTED: Improvement over recent passes < 0.5%. ${regressionInfo.plateauBreakdown}`);
+      console.log(`  Remaining mismatch may be irreducible (font rendering, photographic content). Consider stopping.\n`);
     }
 
     // Surface dimension warning prominently before other output
@@ -141,19 +257,30 @@ program
       const ref = dimIssue.reference as { width: number; height: number } | undefined;
       const impl = dimIssue.implementation as { width: number; height: number } | undefined;
       console.log(`⚠ DIMENSION WARNING: Reference is ${ref?.width}x${ref?.height} but implementation is ${impl?.width}x${impl?.height}.`);
-      console.log(`  This inflates the mismatch ratio. Use --width ${ref?.width} --height ${ref?.height} with the capture command to match.\n`);
+      console.log(`  This inflates the mismatch ratio. Re-capture with:`);
+      console.log(`    one-shot-ui capture --file <impl> --output <out> --match-reference ${referencePath}`);
+      console.log(`  Or manually: one-shot-ui capture --file <impl> --output <out> --width ${ref?.width} --height ${ref?.height}\n`);
     }
 
-    console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
-    if (report.summary.segmented) {
+    if (report.summary.segmented?.irreducibleEstimate != null) {
       const seg = report.summary.segmented;
-      console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content (irreducible): ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+      const actionable = Math.max(0, report.summary.mismatchRatio - seg.irreducibleEstimate);
+      console.log(`Mismatch: ${(report.summary.mismatchRatio * 100).toFixed(1)}% (estimated actionable: ~${(actionable * 100).toFixed(1)}%, irreducible content: ~${(seg.irreducibleEstimate * 100).toFixed(1)}%)`);
+      console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content: ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+    } else {
+      console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
+      if (report.summary.segmented) {
+        const seg = report.summary.segmented;
+        console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content (irreducible): ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+      }
     }
     console.log(`Issues: ${report.issues.length}`);
     for (const issue of report.issues.slice(0, Math.min(8, report.issues.length))) {
       const prefix = issue.anchorName ? `${issue.anchorName}: ` : "";
-      console.log(`- [${issue.severity}] ${prefix}${issue.message}`);
-      if (issue.suggestedFix) {
+      const categoryTag = issue.category ? ` [${issue.category}]` : "";
+      const actionableTag = issue.actionable === false ? " (non-actionable)" : "";
+      console.log(`- [${issue.severity}]${categoryTag} ${prefix}${issue.message}${actionableTag}`);
+      if (issue.suggestedFix && issue.actionable !== false) {
         console.log(`  fix: ${issue.suggestedFix}`);
       }
     }
@@ -169,6 +296,20 @@ program
     }
     if (report.artifacts.heatmapPath) {
       console.log(`Heatmap: ${report.artifacts.heatmapPath}`);
+    }
+
+    // --top-fixes: print N highest-impact actionable fixes as plain text
+    const topFixesCount = Number.parseInt(options.topFixes, 10);
+    if (topFixesCount > 0 && report.topEditCandidates?.length) {
+      console.log(`\n── Top ${topFixesCount} Actionable Fixes ──`);
+      for (const candidate of report.topEditCandidates.slice(0, topFixesCount)) {
+        const selector = candidate.cssSelector ? ` on ${candidate.cssSelector}` : "";
+        const anchor = candidate.anchorName ? ` (${candidate.anchorName})` : "";
+        console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}`);
+        for (const css of candidate.cssChanges.slice(1)) {
+          console.log(`   ${css}`);
+        }
+      }
     }
   });
 
@@ -232,17 +373,91 @@ program
   .command("scaffold")
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
-  .option("--react", "Generate React component hierarchy", false)
+  .option("--react", "Generate React component hierarchy (legacy CSS modules)", false)
+  .option("--framework <framework>", "Output framework: react (default) or vanilla", "react")
+  .option("--styling <styling>", "Styling approach: tailwind (default) or css", "tailwind")
   .option("--no-ocr", "Disable OCR text extraction")
-  .option("--output <dir>", "Directory to write scaffold files")
+  .option("--output <dir>", "Directory or file path to write scaffold files")
   .option("--mode <mode>", "Scaffold layout mode: absolute or structured", "structured")
   .action(async (imagePath, options) => {
     const report = await extractImageReport(imagePath, {
       disableOcr: options.ocr === false
     });
 
-    const { generateHtmlScaffold, generateReactScaffold } = await import("@one-shot-ui/core/scaffold");
+    const { generateHtmlScaffold, generateReactScaffold, generateTailwindReactScaffold } = await import("@one-shot-ui/core/scaffold");
 
+    const framework: string = options.framework ?? "react";
+    const styling: string = options.styling ?? "tailwind";
+
+    // React + Tailwind is the default and preferred path
+    if (framework === "react" && styling === "tailwind") {
+      const tailwindResult = generateTailwindReactScaffold(
+        report.implementationPlan!,
+        report.semanticAnchors ?? [],
+        report.tokens ?? [],
+        report.layout,
+        report.text,
+        report.components
+      );
+
+      if (options.output) {
+        const outputPath = resolve(options.output);
+
+        if (outputPath.endsWith(".tsx") || outputPath.endsWith(".jsx")) {
+          // Write as a single file
+          try {
+            const existing = await stat(outputPath);
+            if (existing.isDirectory()) {
+              await rm(outputPath, { recursive: true });
+            }
+          } catch { /* doesn't exist yet */ }
+
+          await mkdir(dirname(outputPath), { recursive: true });
+          await writeFile(outputPath, tailwindResult.tsx, "utf8");
+          console.log(`React + Tailwind scaffold written to ${outputPath}`);
+        } else if (outputPath.endsWith(".html") || outputPath.endsWith(".htm")) {
+          // Wrap in a self-contained HTML file with Tailwind CDN for preview
+          const htmlWrapped = wrapTailwindReactAsHtml(tailwindResult.tsx);
+          try {
+            const existing = await stat(outputPath);
+            if (existing.isDirectory()) {
+              await rm(outputPath, { recursive: true });
+            }
+          } catch { /* doesn't exist yet */ }
+
+          await mkdir(dirname(outputPath), { recursive: true });
+          await writeFile(outputPath, htmlWrapped, "utf8");
+
+          const written = await stat(outputPath);
+          if (!written.isFile()) {
+            throw new Error(`Scaffold output path "${outputPath}" is not a regular file.`);
+          }
+          // Also write the .tsx alongside
+          const tsxPath = outputPath.replace(/\.html?$/i, ".tsx");
+          await writeFile(tsxPath, tailwindResult.tsx, "utf8");
+          console.log(`React + Tailwind scaffold written to ${outputPath} (+ ${tsxPath})`);
+        } else {
+          // Treat as directory
+          await mkdir(outputPath, { recursive: true });
+          await writeFile(resolve(outputPath, tailwindResult.filePath), tailwindResult.tsx, "utf8");
+          // Also write an HTML preview
+          const htmlWrapped = wrapTailwindReactAsHtml(tailwindResult.tsx);
+          await writeFile(resolve(outputPath, "index.html"), htmlWrapped, "utf8");
+          console.log(`React + Tailwind scaffold written to ${outputPath}/`);
+        }
+        return;
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ version: VERSION, framework: "react", styling: "tailwind", scaffold: tailwindResult }, null, 2));
+        return;
+      }
+
+      console.log(tailwindResult.tsx);
+      return;
+    }
+
+    // Vanilla HTML/CSS path (fallback)
     const scaffold = generateHtmlScaffold(
       report.implementationPlan!,
       report.semanticAnchors ?? [],
@@ -269,8 +484,24 @@ program
 
       // If the output path looks like an HTML file, write directly as a file
       if (outputPath.endsWith(".html") || outputPath.endsWith(".htm")) {
+        // Safety: if a directory exists at the target path (from a previous bad run), remove it
+        try {
+          const existing = await stat(outputPath);
+          if (existing.isDirectory()) {
+            await rm(outputPath, { recursive: true });
+          }
+        } catch {
+          // Path doesn't exist yet — that's fine
+        }
+
         await mkdir(dirname(outputPath), { recursive: true });
         await writeFile(outputPath, scaffold.html, "utf8");
+
+        // Verify the output is a regular file, not a directory
+        const written = await stat(outputPath);
+        if (!written.isFile()) {
+          throw new Error(`Scaffold output path "${outputPath}" is not a regular file. Check for conflicting directories.`);
+        }
 
         // Write CSS alongside
         const cssPath = outputPath.replace(/\.html?$/i, ".css");
@@ -311,7 +542,7 @@ program
     }
 
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, scaffold }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, framework: "vanilla", styling: "css", scaffold }, null, 2));
       return;
     }
 
@@ -320,20 +551,37 @@ program
 
 program
   .command("run")
-  .argument("<referencePath>", "Path to the reference screenshot")
+  .argument("[referencePath]", "Path to the reference screenshot")
+  .argument("[implementationPath]", "Path to implementation HTML file or URL (alternative to --impl)")
   .option("--impl <path>", "Path to implementation HTML file or URL")
   .option("--file <path>", "Alias for --impl")
+  .option("--reference <path>", "Alias for the referencePath argument (ignored if positional arg given)")
   .option("--output <dir>", "Working directory for intermediate files", "./one-shot-run")
   .option("--max-passes <n>", "Maximum refinement passes", "5")
   .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--json", "Print session log as JSON", false)
   .option("--dry-run", "Print detailed suggested edits for each pass", false)
-  .action(async (referencePath, options) => {
+  .action(async (referencePath, implementationPathArg, options) => {
     ensureChromium();
-    const implPath = options.impl ?? options.file;
+    const refPath = referencePath ?? options.reference;
+    if (!refPath) {
+      console.error("Error: reference path is required.");
+      console.error("");
+      console.error("Usage: one-shot-ui run <reference.png> <output.html> [--passes 5] [--threshold 0.02]");
+      console.error("   or: one-shot-ui run --reference reference.png --impl output.html");
+      process.exit(1);
+    }
+    const implPath = options.impl ?? options.file ?? implementationPathArg;
     if (!implPath) {
-      console.error("Error: --impl (or --file) is required. Provide the path to the implementation HTML file or URL.");
+      console.error("Error: implementation path is required.");
+      console.error("");
+      console.error("Usage: one-shot-ui run reference.png output.html [--passes 5] [--threshold 0.02]");
+      console.error("");
+      console.error("Examples:");
+      console.error("  one-shot-ui run reference.png output.html");
+      console.error("  one-shot-ui run reference.png --impl output.html --max-passes 10");
+      console.error("  one-shot-ui run reference.png http://localhost:3000 --threshold 0.05");
       process.exit(1);
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -345,12 +593,12 @@ program
     const sessionLog: SessionEntry[] = [];
 
     // Auto-detect reference image dimensions for viewport matching
-    const refDimensions = await readImageDimensions(resolve(referencePath));
+    const refDimensions = await readImageDimensions(resolve(refPath));
     const captureWidth = refDimensions.width;
     const captureHeight = refDimensions.height;
 
     console.log(`Starting multi-pass orchestration...`);
-    console.log(`Reference: ${referencePath} (${captureWidth}x${captureHeight})`);
+    console.log(`Reference: ${refPath} (${captureWidth}x${captureHeight})`);
     console.log(`Implementation: ${implPath}`);
     console.log(`Capture viewport: ${captureWidth}x${captureHeight} (auto-matched to reference)`);
     console.log(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
@@ -358,9 +606,22 @@ program
 
     // Step 1: Extract reference
     console.log(`[Pass 0] Extracting reference...`);
-    const referenceReport = await extractImageReport(resolve(referencePath), {
-      disableOcr: options.ocr === false
-    });
+    let referenceReport;
+    try {
+      referenceReport = await extractImageReport(resolve(refPath), {
+        disableOcr: options.ocr === false
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[run] Step 'extract' failed: ${msg}`);
+      sessionLog.push({
+        pass: 0,
+        phase: "extract",
+        timestamp: new Date().toISOString(),
+        error: msg
+      });
+      process.exit(1);
+    }
 
     sessionLog.push({
       pass: 0,
@@ -384,21 +645,40 @@ program
       const captureOutput = resolve(outputDir, `pass-${passNumber}-capture.png`);
       try {
         const isFile = !implPath.startsWith("http");
-        await captureScreenshot({
+        const captureOpts = {
           url: isFile ? undefined : implPath,
           filePath: isFile ? resolve(implPath) : undefined,
           outputPath: captureOutput,
           width: captureWidth,
           height: captureHeight,
           deviceScaleFactor: 1
-        });
+        };
+        try {
+          await captureScreenshot(captureOpts);
+        } catch (firstErr) {
+          if (firstErr instanceof BlankCaptureError) {
+            console.log(`  Blank capture detected, retrying with --skip-blank-check...`);
+            if (firstErr.consoleErrors.length > 0) {
+              console.log(`  Browser errors: ${firstErr.consoleErrors.join("; ")}`);
+            }
+            // Retry with blank check disabled — the page may have a white background
+            await new Promise(r => setTimeout(r, 2000));
+            await captureScreenshot({ ...captureOpts, skipBlankCheck: true });
+          } else {
+            throw firstErr;
+          }
+        }
       } catch (err) {
-        console.error(`Capture failed: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[run] Step 'capture' failed (pass ${passNumber}): ${msg}`);
+        if (err instanceof BlankCaptureError && err.consoleErrors.length > 0) {
+          console.error(`  Browser console errors: ${err.consoleErrors.join("; ")}`);
+        }
         sessionLog.push({
           pass: passNumber,
           phase: "capture",
           timestamp: new Date().toISOString(),
-          error: err instanceof Error ? err.message : String(err)
+          error: msg
         });
         break;
       }
@@ -406,11 +686,24 @@ program
       // Compare
       console.log(`[Pass ${passNumber}] Comparing...`);
       const heatmapPath = resolve(outputDir, `pass-${passNumber}-heatmap.png`);
-      const compareReport = await compareImages(resolve(referencePath), captureOutput, {
-        heatmapPath,
-        top: 20,
-        disableOcr: options.ocr === false
-      });
+      let compareReport;
+      try {
+        compareReport = await compareImages(resolve(refPath), captureOutput, {
+          heatmapPath,
+          top: 20,
+          disableOcr: options.ocr === false
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[run] Step 'compare' failed (pass ${passNumber}): ${msg}`);
+        sessionLog.push({
+          pass: passNumber,
+          phase: "compare",
+          timestamp: new Date().toISOString(),
+          error: msg
+        });
+        break;
+      }
 
       currentMismatchRatio = compareReport.summary.mismatchRatio;
 
@@ -481,7 +774,7 @@ program
 
         for (const anchor of referenceReport.semanticAnchors.filter(a => a.parentId === null)) {
           try {
-            const regionCompare = await compareImages(resolve(referencePath), captureOutput, {
+            const regionCompare = await compareImages(resolve(refPath), captureOutput, {
               top: 8,
               disableOcr: options.ocr === false,
               region: anchor.name
@@ -554,7 +847,7 @@ program
     const convergenceSummary = buildConvergenceSummary(sessionLog, threshold);
     const sessionReport = {
       version: VERSION,
-      reference: resolve(referencePath),
+      reference: resolve(refPath),
       implementation: implPath,
       totalPasses: passNumber,
       finalMismatchRatio: currentMismatchRatio,
@@ -638,6 +931,8 @@ program
   .option("--region <anchorName>", "Suggest fixes for a named semantic anchor only")
   .option("--crop <x,y,width,height>", "Suggest fixes for a cropped rectangle only")
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
+  .option("--framework <framework>", "Output format: react (Tailwind classes) or vanilla (CSS)", "react")
+  .option("--styling <styling>", "Styling approach: tailwind or css", "tailwind")
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       top: Number.parseInt(options.top, 10),
@@ -667,18 +962,83 @@ program
       }
     }
 
-    const fixes = generateImplementationGuidance(report);
+    // Deprioritize content-category (photographic/irreducible) issues in suggestions
+    const actionableReport = {
+      ...report,
+      issues: report.issues.filter(i => i.actionable !== false)
+    };
+    const allFixes = generateImplementationGuidance(actionableReport);
+
+    // Filter out low-confidence noise: suppress fixes for issues whose visual weight
+    // is below 2% (sub-pixel noise, e.g. blog-article's "white background as missing").
+    // Also suppress MISSING_NODE / EXTRA_NODE issues that reference tiny regions.
+    const fixes = allFixes.filter(fix => {
+      // Always keep high-priority fixes
+      if (fix.priority === "high") return true;
+      // Filter out MISSING_NODE noise: issues that are purely tiny background region mismatches
+      if (fix.category === "structure" && fix.confidence < 0.3) return false;
+      // Filter out low-confidence pixel-region fallbacks with no CSS selector
+      if (!fix.cssSelector && !fix.css && fix.confidence <= 0.2) return false;
+      return true;
+    });
+
+    const useTailwind = (options.framework === "react" && options.styling === "tailwind") ||
+                        (options.framework === "react" && !options.styling) ||
+                        (!options.framework && options.styling === "tailwind");
+
+    // Convert CSS suggestions to Tailwind class suggestions when appropriate
+    if (useTailwind) {
+      const { cssToTailwindClass } = await import("@one-shot-ui/core/scaffold");
+      for (const fix of fixes) {
+        if (fix.css) {
+          // Parse CSS declarations and convert each to Tailwind
+          const tailwindClasses = fix.css
+            .split(";")
+            .map(decl => decl.trim())
+            .filter(decl => decl && !decl.startsWith("/*"))
+            .map(decl => {
+              const colonIdx = decl.indexOf(":");
+              if (colonIdx < 0) return null;
+              const prop = decl.slice(0, colonIdx).trim();
+              const val = decl.slice(colonIdx + 1).trim().replace(/;$/, "");
+              // Handle "current -> target" arrow format
+              const arrowIdx = val.indexOf(" -> ");
+              const targetVal = arrowIdx >= 0 ? val.slice(arrowIdx + 4).trim() : val;
+              return cssToTailwindClass(prop, targetVal);
+            })
+            .filter(Boolean);
+          if (tailwindClasses.length > 0) {
+            (fix as any).tailwind = tailwindClasses.join(" ");
+          }
+        }
+        // Convert cssSelector to className suggestion
+        if (fix.cssSelector) {
+          (fix as any).classNameHint = fix.cssSelector.replace(/^\./, "").replace(/\[data-[^\]]+\]/g, "");
+        }
+      }
+    }
+
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, fixes }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes }, null, 2));
       return;
     }
 
-    console.log(`${fixes.length} suggested fixes (ordered by priority):\n`);
+    const filteredCount = allFixes.length - fixes.length;
+    console.log(`${fixes.length} suggested fixes (ordered by priority)${filteredCount > 0 ? ` (${filteredCount} low-confidence noise items filtered)` : ""}:\n`);
     for (const fix of fixes) {
       const label = fix.anchorName ? `${fix.anchorName} · ` : "";
       console.log(`[${fix.priority}] ${fix.category}: ${label}${fix.description} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
-      if (fix.css) console.log(`  CSS: ${fix.css}`);
-      if (fix.cssSelector) console.log(`  Selector: ${fix.cssSelector}`);
+      if (useTailwind && (fix as any).tailwind) {
+        console.log(`  Tailwind: className="${(fix as any).tailwind}"`);
+      } else if (fix.css && fix.cssSelector) {
+        // Output as a CSS rule block for direct applicability
+        console.log(`  ${fix.cssSelector} { ${fix.css} }`);
+      } else if (fix.css) {
+        console.log(`  CSS: ${fix.css}`);
+      }
+      if (fix.cssSelector && !(fix.css && fix.cssSelector && !useTailwind)) {
+        console.log(`  Selector: ${fix.cssSelector}`);
+      }
       console.log();
     }
   });
@@ -686,25 +1046,60 @@ program
 program
   .command("capture")
   .option("--url <url>", "HTTP URL to capture")
-  .option("--file <filePath>", "Local HTML file to capture")
+  .option("--file <filePath>", "Local HTML file or .tsx React component to capture")
   .requiredOption("--output <outputPath>", "Screenshot output path")
   .option("--width <width>", "Viewport width", "1440")
   .option("--height <height>", "Viewport height", "1024")
   .option("--scale <scale>", "Device scale factor", "1")
+  .option("--match-reference <path>", "Auto-detect viewport dimensions from a reference image")
+  .option("--skip-blank-check", "Skip the blank-capture validation heuristic", false)
   .option("--json", "Print full JSON report", false)
   .action(async (options) => {
     ensureChromium();
     const outputPath = resolve(options.output);
     await mkdir(dirname(outputPath), { recursive: true });
 
+    // Auto-detect dimensions from reference image if --match-reference is provided
+    let captureWidth = Number.parseInt(options.width, 10);
+    let captureHeight = Number.parseInt(options.height, 10);
+    if (options.matchReference) {
+      try {
+        const refDims = await readImageDimensions(resolve(options.matchReference));
+        captureWidth = refDims.width;
+        captureHeight = refDims.height;
+        console.log(`Auto-matched viewport to reference: ${captureWidth}x${captureHeight}`);
+      } catch (err) {
+        console.error(`Warning: Could not read reference dimensions from ${options.matchReference}: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`Falling back to --width ${captureWidth} --height ${captureHeight}`);
+      }
+    }
+
+    let filePath = options.file ? resolve(options.file) : undefined;
+
+    // If the file is a .tsx/.jsx, wrap it as an HTML file with Tailwind CDN for capture
+    let tmpHtmlPath: string | undefined;
+    if (filePath && (filePath.endsWith(".tsx") || filePath.endsWith(".jsx"))) {
+      const tsxContent = await readFile(filePath, "utf8");
+      const htmlWrapped = wrapTailwindReactAsHtml(tsxContent);
+      tmpHtmlPath = filePath.replace(/\.tsx$|\.jsx$/, ".capture-tmp.html");
+      await writeFile(tmpHtmlPath, htmlWrapped, "utf8");
+      filePath = tmpHtmlPath;
+    }
+
     const result = await captureScreenshot({
       url: options.url,
-      filePath: options.file ? resolve(options.file) : undefined,
+      filePath,
       outputPath,
-      width: Number.parseInt(options.width, 10),
-      height: Number.parseInt(options.height, 10),
-      deviceScaleFactor: Number.parseFloat(options.scale)
+      width: captureWidth,
+      height: captureHeight,
+      deviceScaleFactor: Number.parseFloat(options.scale),
+      skipBlankCheck: options.skipBlankCheck
     });
+
+    // Clean up temporary HTML wrapper
+    if (tmpHtmlPath) {
+      try { await rm(tmpHtmlPath); } catch {}
+    }
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -791,6 +1186,98 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
   return extractReportSchema.parse(report);
 }
 
+function buildCompactExtract(report: any) {
+  // Dominant colors (max 8)
+  const colors = (report.colors ?? []).slice(0, 8).map((c: any) => ({
+    hex: c.hex,
+    frequency: c.frequency ?? c.ratio ?? 0
+  }));
+
+  // Font sizes sorted by frequency
+  const fontSizeMap = new Map<number, number>();
+  for (const text of report.text ?? []) {
+    const fs = text.typography?.fontSize;
+    if (fs) fontSizeMap.set(fs, (fontSizeMap.get(fs) ?? 0) + 1);
+  }
+  const fontSizes = [...fontSizeMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([size, count]) => ({ size, count }));
+
+  // Semantic anchors as regions with roles and text previews
+  const anchors = report.semanticAnchors ?? [];
+  const regions = anchors.slice(0, 30).map((a: any) => {
+    // Find text blocks overlapping this anchor
+    const overlappingText = (report.text ?? []).filter((t: any) => {
+      if (!t.bounds || !a.bounds) return false;
+      return t.bounds.x >= a.bounds.x && t.bounds.y >= a.bounds.y &&
+        t.bounds.x + t.bounds.width <= a.bounds.x + a.bounds.width + 10 &&
+        t.bounds.y + t.bounds.height <= a.bounds.y + a.bounds.height + 10;
+    });
+    const textPreview = overlappingText
+      .slice(0, 2)
+      .map((t: any) => (t.text ?? "").split(/\s+/).slice(0, 5).join(" "))
+      .filter(Boolean)
+      .join("; ") || undefined;
+    return {
+      role: a.role ?? a.name ?? "section",
+      x: a.bounds.x,
+      y: a.bounds.y,
+      width: a.bounds.width,
+      height: a.bounds.height,
+      textPreview
+    };
+  });
+
+  // If no semantic anchors, fall back to layout nodes grouped by position
+  if (regions.length === 0) {
+    const layoutNodes = (report.layout ?? []).slice(0, 20);
+    for (const node of layoutNodes) {
+      const overlappingText = (report.text ?? []).filter((t: any) => {
+        if (!t.bounds || !node.bounds) return false;
+        return t.bounds.x >= node.bounds.x && t.bounds.y >= node.bounds.y &&
+          t.bounds.x + t.bounds.width <= node.bounds.x + node.bounds.width + 10 &&
+          t.bounds.y + t.bounds.height <= node.bounds.y + node.bounds.height + 10;
+      });
+      const textPreview = overlappingText
+        .slice(0, 2)
+        .map((t: any) => (t.text ?? "").split(/\s+/).slice(0, 5).join(" "))
+        .filter(Boolean)
+        .join("; ") || undefined;
+      regions.push({
+        role: "block",
+        x: node.bounds.x,
+        y: node.bounds.y,
+        width: node.bounds.width,
+        height: node.bounds.height,
+        textPreview
+      });
+    }
+  }
+
+  // Grid/column structure detection
+  let gridStructure: { columns: number; rows: number } | undefined;
+  if (report.layoutStrategy?.type === "grid" || report.layoutStrategy?.type === "columns") {
+    const ls = report.layoutStrategy;
+    gridStructure = {
+      columns: ls.columns ?? ls.columnCount ?? 1,
+      rows: ls.rows ?? Math.ceil((report.layout?.length ?? 0) / Math.max(1, ls.columns ?? ls.columnCount ?? 1))
+    };
+  }
+
+  return {
+    image: { width: report.image.width, height: report.image.height },
+    background: report.diagnostics?.background ?? colors[0]?.hex ?? "#ffffff",
+    colors,
+    fontSizes,
+    layoutStrategy: report.layoutStrategy ? {
+      type: report.layoutStrategy.type,
+      confidence: report.layoutStrategy.confidence
+    } : undefined,
+    gridStructure,
+    regions
+  };
+}
+
 function enrichLayoutNodes(image: Awaited<ReturnType<typeof loadImage>>, nodes: LayoutNode[], backgroundHex: string): LayoutNode[] {
   return nodes.map((node) => {
     const fill = estimateNodeFill(image, node.bounds) ?? node.fill;
@@ -834,6 +1321,46 @@ function scopeLayout(
   return layout.filter((node) => intersects(node.bounds, focus));
 }
 
+/**
+ * Infer a CSS selector from an element's bounding box position and size.
+ * Used when the implementation is manually-built (no scaffold anchors) to
+ * provide actionable selectors based on semantic role inference.
+ * This replaces the scaffold-anchor-based mapping with positional heuristics.
+ */
+function inferSelectorFromBounds(bounds: Bounds): string | null {
+  // Use common viewport dimensions as reference (1440x900)
+  const viewportWidth = 1440;
+  const viewportHeight = 900;
+
+  const widthRatio = bounds.width / viewportWidth;
+  const heightRatio = bounds.height / viewportHeight;
+  const topRatio = bounds.y / viewportHeight;
+  const bottomEdge = (bounds.y + bounds.height) / viewportHeight;
+
+  // Full-width top element = likely header/nav
+  if (widthRatio > 0.8 && heightRatio < 0.15 && topRatio < 0.05) {
+    return "header, nav, [class*='header'], [class*='nav']";
+  }
+  // Full-width bottom element = likely footer
+  if (widthRatio > 0.8 && heightRatio < 0.15 && bottomEdge > 0.9) {
+    return "footer, [class*='footer']";
+  }
+  // Tall narrow element on left/right = sidebar
+  if (heightRatio > 0.4 && widthRatio < 0.25) {
+    return "aside, [class*='sidebar'], [class*='side']";
+  }
+  // Large central element = main content
+  if (widthRatio > 0.5 && heightRatio > 0.3) {
+    return "main, [class*='main'], [class*='content']";
+  }
+  // Small square element = likely card, button, or icon
+  if (bounds.width < 300 && bounds.height < 300 && Math.abs(bounds.width - bounds.height) < 50) {
+    return `div:nth-child(n) /* ~${bounds.width}x${bounds.height} element at (${bounds.x},${bounds.y}) */`;
+  }
+
+  return null;
+}
+
 function resolveRegionBounds(region: string | undefined, anchors: Array<{ name: string; bounds: Bounds }>): Bounds | undefined {
   if (!region) {
     return undefined;
@@ -873,8 +1400,32 @@ type ImplementationFix = {
   confidence: number;
 };
 
-function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown }> }): ImplementationFix[] {
+function inferCssCategory(issueCode: string): string | undefined {
+  const map: Record<string, string> = {
+    POSITION_MISMATCH: "position/margin/padding",
+    SIZE_MISMATCH: "width/height",
+    SPACING_MISMATCH: "margin/padding/gap",
+    BORDER_RADIUS_MISMATCH: "border-radius",
+    COLOR_MISMATCH: "background-color",
+    COLOR_MISMATCH_AT_POSITION: "background-color",
+    SHADOW_MISMATCH: "box-shadow",
+    GRADIENT_MISMATCH: "background",
+    FONT_SIZE_MISMATCH: "font-size",
+    FONT_WEIGHT_MISMATCH: "font-weight",
+    FONT_FAMILY_MISMATCH: "font-family",
+  };
+  return map[issueCode];
+}
+
+function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; anchorId?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown; issueBounds?: Bounds }> }): ImplementationFix[] {
   const fixes: ImplementationFix[] = [];
+
+  // Detect whether the HTML was scaffold-generated by checking for scaffold-specific
+  // attributes in the issues. If no issues reference data-anchor or data-node selectors,
+  // the HTML is likely manually built and we should avoid scaffold region anchors.
+  const isScaffoldGenerated = report.issues.some(
+    (i) => i.cssSelector?.includes("data-anchor") || i.cssSelector?.includes("data-node")
+  );
 
   for (const issue of report.issues) {
     const fix: ImplementationFix = {
@@ -983,11 +1534,43 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
     }
 
     // Ensure every fix has a CSS selector
+    if (!fix.cssSelector && issue.cssSelector) {
+      fix.cssSelector = issue.cssSelector;
+    }
     if (!fix.cssSelector && issue.anchorName) {
-      fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+      if (isScaffoldGenerated) {
+        // Scaffold-generated: use data-anchor attribute selectors
+        fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+      } else {
+        // Manually-built HTML: derive a semantic class name suggestion
+        // without referencing scaffold-specific attributes
+        fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+      }
     }
     if (!fix.cssSelector && issue.nodeId) {
-      fix.cssSelector = `[data-node="${issue.nodeId}"]`;
+      if (isScaffoldGenerated) {
+        fix.cssSelector = `[data-node="${issue.nodeId}"]`;
+      } else {
+        // For manually-built HTML, fall back to CSS property category instead of node IDs
+        const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
+        if (cssProp) {
+          fix.description = `${fix.description} (target element with ${cssProp})`;
+        }
+      }
+    }
+
+    // For manually-built HTML with issueBounds but no selector, use bounding-box
+    // overlap to infer a meaningful semantic selector instead of scaffold region IDs
+    if (!fix.cssSelector && !isScaffoldGenerated && issue.issueBounds) {
+      const b = issue.issueBounds;
+      const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
+      // Infer a semantic selector from the element's position and size on the page
+      const inferredSelector = inferSelectorFromBounds(b);
+      if (inferredSelector) {
+        fix.cssSelector = inferredSelector;
+        fix.confidence = Math.max(fix.confidence, 0.5);
+      }
+      fix.description = `${fix.description} (element near ${b.x},${b.y} ${b.width}x${b.height}${cssProp ? `, adjust ${cssProp}` : ""})`;
     }
 
     // Fallback: always provide at least a color suggestion
@@ -995,8 +1578,14 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       const ref = issue.reference as any;
       if (ref.fill) {
         fix.css = `background-color: ${ref.fill};`;
-      } else if (ref.bounds) {
+      } else if (ref.bounds && isScaffoldGenerated) {
         fix.css = `/* Position: (${ref.bounds.x}, ${ref.bounds.y}) ${ref.bounds.width}x${ref.bounds.height} */`;
+      } else if (ref.bounds) {
+        // For manually-built HTML, suggest CSS properties instead of raw pixel coordinates
+        const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
+        fix.css = cssProp
+          ? `/* Adjust ${cssProp} for element at approximately (${ref.bounds.x}, ${ref.bounds.y}) */`
+          : `/* Check element near (${ref.bounds.x}, ${ref.bounds.y}) ${ref.bounds.width}x${ref.bounds.height} */`;
       }
     }
 
@@ -1259,6 +1848,8 @@ function buildNextActions(compareReport: any, passNumber: number) {
 
   for (const [idx, issue] of issues.entries()) {
     if (idx >= 10) break;
+    // Skip non-actionable issues (content/typography that can't be fixed with CSS)
+    if (issue.actionable === false) continue;
 
     const selector = issue.cssSelector
       ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined);
@@ -1310,7 +1901,7 @@ function buildNextActions(compareReport: any, passNumber: number) {
 
   // MISSING_NODE entries as "add element" instructions
   const missingNodes = issues
-    .filter((i: any) => i.code === "MISSING_NODE")
+    .filter((i: any) => i.code === "MISSING_NODE" && i.actionable !== false)
     .slice(0, 5)
     .map((issue: any) => ({
       action: "add-element",
@@ -1504,4 +2095,38 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
       ? `Improving: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}% (${(improvementRate * 100).toFixed(0)}% improvement).`
       : `Regression detected: ${(firstRatio * 100).toFixed(2)}% → ${(lastRatio * 100).toFixed(2)}%.`
   };
+}
+
+/**
+ * Wrap a React + Tailwind TSX component as a self-contained HTML file
+ * that can be opened directly in a browser or captured by Puppeteer.
+ * Uses Tailwind CDN, React CDN, and Babel standalone for in-browser JSX transform.
+ */
+function wrapTailwindReactAsHtml(tsx: string): string {
+  // Strip the import line and export default, extract component body
+  const stripped = tsx
+    .replace(/^import\s+React\s+from\s+["']react["'];?\s*\n?/m, "")
+    .replace(/^export\s+default\s+/m, "const PageComponent = ");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UI Scaffold</title>
+  <script src="https://cdn.tailwindcss.com"><\/script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin><\/script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin><\/script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+${stripped}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(PageComponent));
+  <\/script>
+</body>
+</html>`;
 }

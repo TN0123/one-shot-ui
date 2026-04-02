@@ -13,8 +13,9 @@ reference screenshot to a pixel-accurate implementation.
 1. **Extract** — Analyze a reference screenshot into structured layout data:
        one-shot-ui extract reference.png --json
 
-2. **Scaffold** — Generate starter HTML/CSS (or React) from the extraction:
-       one-shot-ui scaffold reference.png --output ./src --react
+2. **Scaffold** — Generate React + Tailwind component (default) or HTML/CSS:
+       one-shot-ui scaffold reference.png --output ./src
+       one-shot-ui scaffold reference.png --output ./src --framework vanilla --styling css
 
 3. **Capture** — Screenshot your implementation:
        one-shot-ui capture --url http://localhost:3000 --output impl.png
@@ -34,11 +35,11 @@ reference screenshot to a pixel-accurate implementation.
 |-----------------|--------------------------------------------|----------------------------------  |
 | extract         | Analyze screenshot into layout/color/text  | --json, --no-ocr, --overlay, --fine|
 | compare         | Pixel + structural diff                    | --json, --heatmap, --dom-diff      |
-| scaffold        | Generate HTML/CSS or React from screenshot | --react, --output, --mode          |
+| scaffold        | Generate React+Tailwind or HTML/CSS         | --framework, --styling, --output   |
 | tokens          | Extract design tokens                      | --json                             |
 | plan            | Generate implementation strategy           | --json                             |
-| capture         | Screenshot a URL or HTML file              | --url, --file, --output            |
-| suggest-fixes   | CSS fix suggestions from diff              | --json, --top, --dom-diff          |
+| capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output            |
+| suggest-fixes   | Tailwind/CSS fix suggestions from diff     | --json, --top, --dom-diff, --framework |
 | run             | Multi-pass refinement loop                 | --impl, --max-passes, --threshold  |
 | benchmark       | Run benchmark suites                       | --json, --output                   |
 

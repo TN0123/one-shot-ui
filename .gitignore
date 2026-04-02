@@ -11,3 +11,5 @@ testing/
 IMPROVEMENTS.md
 .bg-shell/*
 docs/*
+/one-shot-run/*
+PUBLISHING.md
