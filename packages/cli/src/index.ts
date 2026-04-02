@@ -149,7 +149,7 @@ program
       // Reference is HTML — capture it (use default 1280x800 viewport)
       const captureDest = referencePath.replace(/\.(html|htm)$/i, ".ref-capture.png");
       console.error(`Auto-capturing reference HTML: ${referencePath} → ${captureDest}`);
-      await captureScreenshot({ filePath: resolve(referencePath), outputPath: resolve(captureDest), width: 1280, height: 800 });
+      await captureScreenshot({ filePath: resolve(referencePath), outputPath: resolve(captureDest), width: 1280, height: 800, deviceScaleFactor: 1, skipBlankCheck: false });
       effectiveRefPath = captureDest;
       tmpCaptures.push(captureDest);
     }
@@ -166,7 +166,7 @@ program
       } catch {}
       const captureDest = resolvedImplPath.replace(/\.(html|htm)$/i, ".impl-capture.png");
       console.error(`Auto-capturing implementation HTML: ${resolvedImplPath} → ${captureDest}`);
-      await captureScreenshot({ filePath: resolve(resolvedImplPath), outputPath: resolve(captureDest), width: captureWidth, height: captureHeight });
+      await captureScreenshot({ filePath: resolve(resolvedImplPath), outputPath: resolve(captureDest), width: captureWidth, height: captureHeight, deviceScaleFactor: 1, skipBlankCheck: false });
       effectiveImplPathResolved = captureDest;
       tmpCaptures.push(captureDest);
     }
