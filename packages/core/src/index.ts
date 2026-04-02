@@ -325,7 +325,9 @@ export const compareReportSchema = z.object({
     cssSelector: z.string().optional(),
     description: z.string(),
     cssChanges: z.array(z.string()),
-    estimatedImpact: z.enum(["low", "medium", "high"])
+    estimatedImpact: z.enum(["low", "medium", "high"]),
+    risk: z.enum(["low", "medium", "high"]).optional(),
+    affectedAreaPercent: z.number().min(0).max(100).optional(),
   })).optional(),
   artifacts: z.object({
     heatmapPath: z.string().nullable(),

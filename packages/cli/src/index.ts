@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, stat, rm } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { Command } from "commander";
@@ -117,8 +118,9 @@ program
 
 program
   .command("compare")
-  .argument("<referencePath>", "Path to the reference screenshot")
-  .argument("<implementationPath>", "Path to the implementation screenshot")
+  .argument("<referencePath>", "Path to the reference screenshot or HTML file")
+  .argument("[implementationPath]", "Path to the implementation screenshot or HTML file")
+  .option("--implementation <path>", "Path to the implementation screenshot or HTML file (alternative to positional arg)")
   .option("--json", "Print full JSON report", false)
   .option("--heatmap <path>", "Path to write the diff heatmap")
   .option("--top <n>", "Maximum number of issues to report", "20")
@@ -131,8 +133,48 @@ program
   .option("--summary", "Print a single human-readable summary line", false)
   .option("--top-fixes <n>", "Print N highest-impact actionable fixes as plain text", "0")
   .action(async (referencePath, implementationPath, options) => {
+    // Resolve implementation path from positional arg or --implementation flag
+    const resolvedImplPath = implementationPath ?? options.implementation;
+    if (!resolvedImplPath) {
+      console.error("Error: implementation path is required. Pass it as a second argument or use --implementation <path>.");
+      process.exit(1);
+    }
+
+    // Auto-capture HTML/HTM files to screenshots before comparing
+    const htmlExts = [".html", ".htm"];
+    const tmpCaptures: string[] = [];
+
+    let effectiveRefPath = referencePath;
+    if (htmlExts.some(ext => referencePath.toLowerCase().endsWith(ext))) {
+      // Reference is HTML — capture it (use default 1280x800 viewport)
+      const captureDest = referencePath.replace(/\.(html|htm)$/i, ".ref-capture.png");
+      console.error(`Auto-capturing reference HTML: ${referencePath} → ${captureDest}`);
+      await captureScreenshot({ filePath: resolve(referencePath), outputPath: resolve(captureDest), width: 1280, height: 800 });
+      effectiveRefPath = captureDest;
+      tmpCaptures.push(captureDest);
+    }
+
+    let effectiveImplPathResolved = resolvedImplPath;
+    if (htmlExts.some(ext => resolvedImplPath.toLowerCase().endsWith(ext))) {
+      // Implementation is HTML — capture at reference dimensions
+      let captureWidth = 1280;
+      let captureHeight = 800;
+      try {
+        const refDims = await readImageDimensions(resolve(effectiveRefPath));
+        captureWidth = refDims.width;
+        captureHeight = refDims.height;
+      } catch {}
+      const captureDest = resolvedImplPath.replace(/\.(html|htm)$/i, ".impl-capture.png");
+      console.error(`Auto-capturing implementation HTML: ${resolvedImplPath} → ${captureDest}`);
+      await captureScreenshot({ filePath: resolve(resolvedImplPath), outputPath: resolve(captureDest), width: captureWidth, height: captureHeight });
+      effectiveImplPathResolved = captureDest;
+      tmpCaptures.push(captureDest);
+    }
+
+    referencePath = effectiveRefPath;
+
     // Auto-resize: if enabled, check dimensions and resize implementation to match reference
-    let effectiveImplPath = implementationPath;
+    let effectiveImplPath = effectiveImplPathResolved;
     if (options.autoResize) {
       const refDims = await readImageDimensions(resolve(referencePath));
       const implDims = await readImageDimensions(resolve(implementationPath));
@@ -142,7 +184,7 @@ program
         await sharp(resolve(implementationPath))
           .resize(refDims.width, refDims.height, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
           .toFile(resolve(resizedPath));
-        console.log(`⚠ Auto-resized implementation from ${implDims.width}x${implDims.height} to ${refDims.width}x${refDims.height} (saved to ${resizedPath})`);
+        console.error(`⚠ Auto-resized implementation from ${implDims.width}x${implDims.height} to ${refDims.width}x${refDims.height} (saved to ${resizedPath})`);
         effectiveImplPath = resizedPath;
       }
     }
@@ -288,7 +330,12 @@ program
       console.log(`\nTop edit candidates:`);
       for (const candidate of report.topEditCandidates) {
         const selector = candidate.cssSelector ? ` (${candidate.cssSelector})` : "";
-        console.log(`  ${candidate.rank}. [${candidate.estimatedImpact}]${selector} ${candidate.description}`);
+        const riskLabel = (candidate as any).risk === "high"
+          ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
+          : (candidate as any).risk === "medium"
+          ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
+          : "";
+        console.log(`  ${candidate.rank}. [${candidate.estimatedImpact}]${riskLabel}${selector} ${candidate.description}`);
         for (const css of candidate.cssChanges) {
           console.log(`     ${css}`);
         }
@@ -305,7 +352,10 @@ program
       for (const candidate of report.topEditCandidates.slice(0, topFixesCount)) {
         const selector = candidate.cssSelector ? ` on ${candidate.cssSelector}` : "";
         const anchor = candidate.anchorName ? ` (${candidate.anchorName})` : "";
-        console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}`);
+        const riskWarning = (candidate as any).risk === "high"
+          ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
+          : "";
+        console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}${riskWarning}`);
         for (const css of candidate.cssChanges.slice(1)) {
           console.log(`   ${css}`);
         }
@@ -597,15 +647,15 @@ program
     const captureWidth = refDimensions.width;
     const captureHeight = refDimensions.height;
 
-    console.log(`Starting multi-pass orchestration...`);
-    console.log(`Reference: ${refPath} (${captureWidth}x${captureHeight})`);
-    console.log(`Implementation: ${implPath}`);
-    console.log(`Capture viewport: ${captureWidth}x${captureHeight} (auto-matched to reference)`);
-    console.log(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
-    console.log();
+    console.error(`Starting multi-pass orchestration...`);
+    console.error(`Reference: ${refPath} (${captureWidth}x${captureHeight})`);
+    console.error(`Implementation: ${implPath}`);
+    console.error(`Capture viewport: ${captureWidth}x${captureHeight} (auto-matched to reference)`);
+    console.error(`Max passes: ${maxPasses}, Convergence threshold: ${(threshold * 100).toFixed(1)}%`);
+    console.error();
 
     // Step 1: Extract reference
-    console.log(`[Pass 0] Extracting reference...`);
+    console.error(`[Pass 0] Extracting reference...`);
     let referenceReport;
     try {
       referenceReport = await extractImageReport(resolve(refPath), {
@@ -634,12 +684,30 @@ program
       }
     });
 
+    // Auto-scaffold if implementation file doesn't exist
+    if (!implPath.startsWith("http") && !existsSync(resolve(implPath))) {
+      console.error(`[Pass 0] Implementation file not found — auto-scaffolding from reference...`);
+      const { generateTailwindReactScaffold } = await import("@one-shot-ui/core/scaffold");
+      const scaffoldResult = generateTailwindReactScaffold(
+        referenceReport.implementationPlan!,
+        referenceReport.semanticAnchors ?? [],
+        referenceReport.tokens ?? [],
+        referenceReport.layout,
+        referenceReport.text,
+        referenceReport.components
+      );
+      const htmlWrapped = wrapTailwindReactAsHtml(scaffoldResult.tsx);
+      await mkdir(dirname(resolve(implPath)), { recursive: true });
+      await writeFile(resolve(implPath), htmlWrapped, "utf-8");
+      console.error(`[Pass 0] Scaffold written to ${implPath}`);
+    }
+
     let currentMismatchRatio = 1;
     let passNumber = 0;
 
     while (passNumber < maxPasses && currentMismatchRatio > threshold) {
       passNumber++;
-      console.log(`[Pass ${passNumber}] Capturing implementation...`);
+      console.error(`[Pass ${passNumber}] Capturing implementation...`);
 
       // Capture
       const captureOutput = resolve(outputDir, `pass-${passNumber}-capture.png`);
@@ -658,9 +726,9 @@ program
           await captureScreenshot(captureOpts);
         } catch (firstErr) {
           if (firstErr instanceof BlankCaptureError) {
-            console.log(`  Blank capture detected, retrying with --skip-blank-check...`);
+            console.error(`  Blank capture detected, retrying with --skip-blank-check...`);
             if (firstErr.consoleErrors.length > 0) {
-              console.log(`  Browser errors: ${firstErr.consoleErrors.join("; ")}`);
+              console.error(`  Browser errors: ${firstErr.consoleErrors.join("; ")}`);
             }
             // Retry with blank check disabled — the page may have a white background
             await new Promise(r => setTimeout(r, 2000));
@@ -685,7 +753,7 @@ program
       }
 
       // Compare
-      console.log(`[Pass ${passNumber}] Comparing...`);
+      console.error(`[Pass ${passNumber}] Comparing...`);
       const heatmapPath = resolve(outputDir, `pass-${passNumber}-heatmap.png`);
       let compareReport;
       try {
@@ -734,8 +802,8 @@ program
         const prevRatio = priorRatios[priorRatios.length - 1]!;
         if (currentMismatchRatio > prevRatio) {
           const delta = currentMismatchRatio - prevRatio;
-          console.log(`  REGRESSION_WARNING: Mismatch increased by ${(delta * 100).toFixed(2)}pp (${(prevRatio * 100).toFixed(2)}% -> ${(currentMismatchRatio * 100).toFixed(2)}%)`);
-          console.log(`  Consider reverting the last change or trying a smaller adjustment.`);
+          console.error(`  REGRESSION_WARNING: Mismatch increased by ${(delta * 100).toFixed(2)}pp (${(prevRatio * 100).toFixed(2)}% -> ${(currentMismatchRatio * 100).toFixed(2)}%)`);
+          console.error(`  Consider reverting the last change or trying a smaller adjustment.`);
         }
       }
 
@@ -745,8 +813,8 @@ program
         const maxRecent = Math.max(...recent);
         const minRecent = Math.min(...recent);
         if ((maxRecent - minRecent) < 0.005) {
-          console.log(`  PLATEAU_REACHED: Last ${recent.length} passes within ${((maxRecent - minRecent) * 100).toFixed(2)}pp of each other.`);
-          console.log(`  Remaining mismatch may be irreducible (font rendering, photographic content). Consider stopping.`);
+          console.error(`  PLATEAU_REACHED: Last ${recent.length} passes within ${((maxRecent - minRecent) * 100).toFixed(2)}pp of each other.`);
+          console.error(`  Remaining mismatch may be irreducible (font rendering, photographic content). Consider stopping.`);
         }
       }
 
@@ -756,21 +824,21 @@ program
         const oscillating = (r[1]! > r[0]! && r[1]! > r[2]!) || (r[1]! < r[0]! && r[1]! < r[2]!);
         if (oscillating) {
           const avg = (r[0]! + r[1]! + r[2]!) / 3;
-          console.log(`  OSCILLATION_DETECTED: Mismatch alternating around ${(avg * 100).toFixed(2)}%. Try splitting the difference on changed values.`);
+          console.error(`  OSCILLATION_DETECTED: Mismatch alternating around ${(avg * 100).toFixed(2)}%. Try splitting the difference on changed values.`);
         }
       }
 
-      console.log(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
-      console.log(`  Issues: ${compareReport.issues.length}`);
+      console.error(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      console.error(`  Issues: ${compareReport.issues.length}`);
 
       if (currentMismatchRatio <= threshold) {
-        console.log(`\nConverged! Mismatch ratio ${(currentMismatchRatio * 100).toFixed(2)}% <= threshold ${(threshold * 100).toFixed(1)}%`);
+        console.error(`\nConverged! Mismatch ratio ${(currentMismatchRatio * 100).toFixed(2)}% <= threshold ${(threshold * 100).toFixed(1)}%`);
         break;
       }
 
       // Region drill-down after first pass
       if (passNumber >= 2 && referenceReport.semanticAnchors) {
-        console.log(`[Pass ${passNumber}] Drilling into regions...`);
+        console.error(`[Pass ${passNumber}] Drilling into regions...`);
         const regionIssues: Array<{ region: string; mismatchRatio: number; issues: any[] }> = [];
 
         for (const anchor of referenceReport.semanticAnchors.filter(a => a.parentId === null)) {
@@ -801,9 +869,9 @@ program
             result: { regionIssues }
           });
 
-          console.log(`  Region drill-down:`);
+          console.error(`  Region drill-down:`);
           for (const ri of regionIssues.sort((a, b) => b.mismatchRatio - a.mismatchRatio)) {
-            console.log(`    ${ri.region}: ${(ri.mismatchRatio * 100).toFixed(1)}% mismatch`);
+            console.error(`    ${ri.region}: ${(ri.mismatchRatio * 100).toFixed(1)}% mismatch`);
           }
         }
       }
@@ -823,25 +891,25 @@ program
         "utf8"
       );
 
-      console.log(`  ${nextActions.summary}`);
+      console.error(`  ${nextActions.summary}`);
       if (options.dryRun) {
-        console.log(`\n[Dry Run] Suggested edits for pass ${passNumber}:`);
+        console.error(`\n[Dry Run] Suggested edits for pass ${passNumber}:`);
         for (const edit of nextActions.edits) {
-          console.log(`\n${edit.cssRuleBlock}`);
+          console.error(`\n${edit.cssRuleBlock}`);
         }
         if (nextActions.missingElements.length > 0) {
-          console.log(`\nMissing elements to add:`);
+          console.error(`\nMissing elements to add:`);
           for (const missing of nextActions.missingElements) {
-            console.log(`  ${missing.description}`);
+            console.error(`  ${missing.description}`);
             if (missing.referenceStyles) {
               const styles = Object.entries(missing.referenceStyles).map(([k, v]) => `${k}: ${v}`).join("; ");
-              console.log(`  Styles: ${styles}`);
+              console.error(`  Styles: ${styles}`);
             }
           }
         }
       }
-      console.log(`  Heatmap: ${heatmapPath}`);
-      console.log();
+      console.error(`  Heatmap: ${heatmapPath}`);
+      console.error();
     }
 
     // Write session log
@@ -867,15 +935,15 @@ program
     if (options.json) {
       console.log(JSON.stringify(sessionReport, null, 2));
     } else {
-      console.log(`\nSession complete.`);
-      console.log(`  Passes: ${passNumber}`);
-      console.log(`  Final mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
-      console.log(`  Converged: ${currentMismatchRatio <= threshold ? "yes" : "no"}`);
-      console.log(`  Trend: ${convergenceSummary.trend}`);
+      console.error(`\nSession complete.`);
+      console.error(`  Passes: ${passNumber}`);
+      console.error(`  Final mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      console.error(`  Converged: ${currentMismatchRatio <= threshold ? "yes" : "no"}`);
+      console.error(`  Trend: ${convergenceSummary.trend}`);
       if (convergenceSummary.message) {
-        console.log(`  ${convergenceSummary.message}`);
+        console.error(`  ${convergenceSummary.message}`);
       }
-      console.log(`  Session log: ${resolve(outputDir, "session.json")}`);
+      console.error(`  Session log: ${resolve(outputDir, "session.json")}`);
     }
   });
 
@@ -1019,8 +1087,21 @@ program
       }
     }
 
+    // Force-surface suggestions when zero actionable fixes remain but reducible mismatch > 0.5%
+    let forceSurfaced: typeof fixes = [];
+    if (fixes.length === 0 && report.summary.segmented?.irreducibleEstimate != null) {
+      const reducible = report.summary.mismatchRatio - (report.summary.segmented.irreducibleEstimate ?? 0);
+      if (reducible > 0.005) {
+        // Surface top 3 issues by score regardless of actionability, with their CSS suggestions
+        const allIssuesFixes = generateImplementationGuidance(report);
+        forceSurfaced = allIssuesFixes
+          .filter(f => f.css || f.cssSelector)
+          .slice(0, 3);
+      }
+    }
+
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...fixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] }, null, 2));
       return;
     }
 
@@ -1041,6 +1122,22 @@ program
         console.log(`  Selector: ${fix.cssSelector}`);
       }
       console.log();
+    }
+
+    // Surface lower-confidence suggestions when reducible mismatch remains
+    if (forceSurfaced.length > 0) {
+      const reducible = report.summary.mismatchRatio - (report.summary.segmented?.irreducibleEstimate ?? 0);
+      console.log(`~${(reducible * 100).toFixed(1)}% mismatch may still be reducible — these suggestions are lower-confidence but worth trying:\n`);
+      for (const fix of forceSurfaced) {
+        const label = fix.anchorName ? `${fix.anchorName} · ` : "";
+        console.log(`[Possibly fixable] ${fix.category}: ${label}${fix.description} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
+        if (fix.css && fix.cssSelector) {
+          console.log(`  ${fix.cssSelector} { ${fix.css} }`);
+        } else if (fix.css) {
+          console.log(`  CSS: ${fix.css}`);
+        }
+        console.log();
+      }
     }
   });
 
@@ -1068,7 +1165,7 @@ program
         const refDims = await readImageDimensions(resolve(options.matchReference));
         captureWidth = refDims.width;
         captureHeight = refDims.height;
-        console.log(`Auto-matched viewport to reference: ${captureWidth}x${captureHeight}`);
+        console.error(`Auto-matched viewport to reference: ${captureWidth}x${captureHeight}`);
       } catch (err) {
         console.error(`Warning: Could not read reference dimensions from ${options.matchReference}: ${err instanceof Error ? err.message : String(err)}`);
         console.error(`Falling back to --width ${captureWidth} --height ${captureHeight}`);
@@ -1847,16 +1944,54 @@ function buildNextActions(compareReport: any, passNumber: number) {
     reasons: string[];
   }>();
 
+  let filteredHighRisk = 0;
+  let filteredNonActionable = 0;
+  let filteredNoSelector = 0;
+  const structuralMismatchCodes = new Set(["POSITION_MISMATCH", "SIZE_MISMATCH", "SPACING_MISMATCH"]);
+
   for (const [idx, issue] of issues.entries()) {
     if (idx >= 10) break;
     // Skip non-actionable issues (content/typography that can't be fixed with CSS)
-    if (issue.actionable === false) continue;
+    if (issue.actionable === false) { filteredNonActionable++; continue; }
+
+    // Skip high-risk issues in auto-apply: large-area or container-resizing changes
+    // that are likely to cascade into child element misalignment
+    const boundsArea = issue.issueBounds ? issue.issueBounds.width * issue.issueBounds.height : 0;
+    const imgArea = (compareReport.referenceImage?.width ?? 1) * (compareReport.referenceImage?.height ?? 1);
+    const areaRatio = imgArea > 0 ? boundsArea / imgArea : 0;
+    if (areaRatio > 0.15) { filteredHighRisk++; continue; }
 
     const selector = issue.cssSelector
       ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined);
-    if (!selector) continue;
+    if (!selector) { filteredNoSelector++; continue; }
 
-    const cssProps = extractCssProperties(issue);
+    let cssProps = extractCssProperties(issue);
+    // For structural mismatches without extracted CSS, generate fallback CSS comments from raw offset data
+    if (Object.keys(cssProps).length === 0 && structuralMismatchCodes.has(issue.code)) {
+      const ref = issue.reference;
+      const impl = issue.implementation;
+      if (issue.code === "POSITION_MISMATCH") {
+        if (ref?.y != null && impl?.y != null && Math.abs(impl.y - ref.y) > 4) {
+          const dir = impl.y > ref.y ? "reduce" : "increase";
+          cssProps[`/* ${issue.cssProperty ?? "margin-top"} */`] = `/* ${dir} top by ~${Math.abs(impl.y - ref.y)}px */`;
+        }
+        if (ref?.x != null && impl?.x != null && Math.abs(impl.x - ref.x) > 4) {
+          const dir = impl.x > ref.x ? "reduce" : "increase";
+          cssProps[`/* ${issue.cssProperty ?? "margin-left"} */`] = `/* ${dir} left by ~${Math.abs(impl.x - ref.x)}px */`;
+        }
+      } else if (issue.code === "SIZE_MISMATCH") {
+        if (ref?.width != null && impl?.width != null && Math.abs(impl.width - ref.width) > 4) {
+          cssProps["/* width */"] = `/* set to ${ref.width}px (currently ${impl.width}px) */`;
+        }
+        if (ref?.height != null && impl?.height != null && Math.abs(impl.height - ref.height) > 4) {
+          cssProps["/* height */"] = `/* set to ${ref.height}px (currently ${impl.height}px) */`;
+        }
+      } else if (issue.code === "SPACING_MISMATCH") {
+        if (ref?.distance != null && impl?.distance != null) {
+          cssProps[`/* ${issue.cssProperty ?? "gap"} */`] = `/* set to ${ref.distance}px (currently ~${impl.distance}px) */`;
+        }
+      }
+    }
     if (Object.keys(cssProps).length === 0 && issue.code !== "MISSING_NODE") continue;
 
     const existing = editMap.get(selector);
@@ -1898,7 +2033,11 @@ function buildNextActions(compareReport: any, passNumber: number) {
 
   // One-line summary for agents
   const topSelectors = edits.slice(0, 3).map(e => e.selector).join(", ");
-  const summary = `Mismatch: ${(mismatchRatio * 100).toFixed(2)}% | ${edits.length} edits needed | Top targets: ${topSelectors || "none"}`;
+  const totalFiltered = filteredHighRisk + filteredNonActionable + filteredNoSelector;
+  const filterNote = totalFiltered > 0
+    ? ` | ${totalFiltered} issues filtered (${filteredHighRisk} high-risk, ${filteredNonActionable} non-actionable, ${filteredNoSelector} missing CSS data)`
+    : "";
+  const summary = `Mismatch: ${(mismatchRatio * 100).toFixed(2)}% | ${edits.length} edits needed | Top targets: ${topSelectors || "none"}${filterNote}`;
 
   // MISSING_NODE entries as "add element" instructions
   const missingNodes = issues
@@ -2059,11 +2198,17 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
   const lastTwo = ratios.slice(-2);
   const stalled = Math.abs(lastTwo[0]! - lastTwo[1]!) < 0.005;
 
-  // Plateau: last 3+ passes within 0.5%
-  const plateau = ratios.length >= 3 && (() => {
+  // Plateau: last 3+ passes within 0.5%, but only if reducible mismatch is small
+  const rawPlateau = ratios.length >= 3 && (() => {
     const recent = ratios.slice(-3);
     return (Math.max(...recent) - Math.min(...recent)) < 0.005;
   })();
+
+  // Check if there's still reducible mismatch — don't declare plateau if > 0.5% reducible
+  const lastComparePass = comparePasses[comparePasses.length - 1];
+  const irreducible = lastComparePass?.result?.segmented?.irreducibleEstimate ?? 0;
+  const reducibleMismatch = lastRatio - irreducible;
+  const plateau = rawPlateau && reducibleMismatch <= 0.005;
 
   // Oscillation: alternating up/down in last 3 passes
   const oscillating = ratios.length >= 3 && (() => {
@@ -2086,6 +2231,8 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
     ratioHistory: ratios,
     message: trend === "converged"
       ? `Converged at ${(lastRatio * 100).toFixed(2)}% mismatch after ${ratios.length} passes.`
+      : trend === "stalled" && rawPlateau && reducibleMismatch > 0.005
+      ? `Scores leveled off at ${(lastRatio * 100).toFixed(2)}% but ~${(reducibleMismatch * 100).toFixed(1)}% may still be reducible. Try lower-confidence suggestions.`
       : trend === "stalled"
       ? `Progress stalled at ${(lastRatio * 100).toFixed(2)}% mismatch. Consider a different approach for remaining issues.`
       : trend === "oscillating"

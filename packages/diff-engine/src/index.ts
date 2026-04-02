@@ -388,7 +388,7 @@ export async function compareImages(
   const clampedIrreducible = Math.min(irreducibleEstimate, mismatchRatio);
 
   const groupedIssues = groupIssuesBySection(filteredIssues, referenceAnchors);
-  const topEditCandidates = buildTopEditCandidates(filteredIssues, referenceAnchors);
+  const topEditCandidates = buildTopEditCandidates(filteredIssues, referenceAnchors, width, height);
 
   return compareReportSchema.parse({
     version: VERSION,
@@ -550,12 +550,18 @@ function categorizeIssue(
   startX: number,
   startY: number
 ): "layout" | "color" | "typography" | "content" {
+  // POSITION_MISMATCH and SIZE_MISMATCH are always CSS-fixable — never classify as content
+  if (issue.code === "POSITION_MISMATCH" || issue.code === "SIZE_MISMATCH") {
+    return "layout";
+  }
+
   // Check if the issue falls inside a content region (photographic)
+  // Only classify as content if >=80% of the issue overlaps with photographic regions
   if (issue.issueBounds) {
     for (const region of contentRegions) {
       const oArea = computeOverlapArea(issue.issueBounds, region.bounds);
       const issueArea = issue.issueBounds.width * issue.issueBounds.height;
-      if (issueArea > 0 && oArea / issueArea > 0.5) {
+      if (issueArea > 0 && oArea / issueArea > 0.8) {
         return "content";
       }
     }
@@ -1370,23 +1376,45 @@ function groupIssuesBySection(issues: CompareIssue[], anchors: SemanticAnchor[])
   });
 }
 
-function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[]): Array<{
+function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[], imageWidth: number, imageHeight: number): Array<{
   rank: number;
   anchorName?: string;
   cssSelector?: string;
   description: string;
   cssChanges: string[];
   estimatedImpact: "low" | "medium" | "high";
+  risk: "low" | "medium" | "high";
+  affectedAreaPercent: number;
 }> {
+  const totalArea = imageWidth * imageHeight;
+
   // Score each issue by visual weight and severity, pick top 5
   // Prioritize actionable issues over non-actionable ones
+  const structuralCodes = new Set(["POSITION_MISMATCH", "SIZE_MISMATCH", "SPACING_MISMATCH"]);
   const scored = issues
-    .filter(i => i.suggestedFix)
+    .filter(i => i.suggestedFix || structuralCodes.has(i.code))
     .map(i => {
       const severityScore = i.severity === "high" ? 3 : i.severity === "medium" ? 2 : 1;
       const vwScore = (i.visualWeight ?? 0.1) * 10;
       const actionableBonus = i.actionable !== false ? 5 : 0;
-      return { issue: i, score: severityScore + vwScore + actionableBonus };
+
+      // Compute affected area ratio for risk scoring
+      const boundsArea = i.issueBounds ? i.issueBounds.width * i.issueBounds.height : 0;
+      const affectedAreaRatio = totalArea > 0 ? boundsArea / totalArea : 0;
+
+      // Cascade risk: container-level properties (width, height, min-height) on regions with children
+      const containerProps = ["width", "height", "min-height"];
+      const cascadeRisk = !!(i.cssProperty && containerProps.some(p => i.cssProperty!.includes(p))
+        && (i.code === "SIZE_MISMATCH") && affectedAreaRatio > 0.05);
+
+      const risk: "low" | "medium" | "high" =
+        (affectedAreaRatio > 0.15 || cascadeRisk) ? "high" :
+        affectedAreaRatio > 0.05 ? "medium" : "low";
+
+      // Penalize high-risk suggestions in scoring so low-risk appear first
+      const riskPenalty = risk === "high" ? -4 : risk === "medium" ? -1 : 0;
+
+      return { issue: i, score: severityScore + vwScore + actionableBonus + riskPenalty, risk, affectedAreaPercent: Math.round(affectedAreaRatio * 1000) / 10 };
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
@@ -1462,7 +1490,9 @@ function buildTopEditCandidates(issues: CompareIssue[], anchors: SemanticAnchor[
       cssSelector: selectorHint,
       description: i.message,
       cssChanges,
-      estimatedImpact: i.severity
+      estimatedImpact: i.severity,
+      risk: entry.risk,
+      affectedAreaPercent: entry.affectedAreaPercent,
     };
   });
 }
