@@ -1,6 +1,6 @@
 # one-shot-ui
 
-Deterministic UI extraction, diffing, and scaffolding from screenshots.
+Deterministic UI extraction and diffing from screenshots.
 
 Turn a reference screenshot into structured JSON — layout regions, colors, typography, spacing, components, design tokens — then compare implementations against the reference and get actionable fix suggestions.
 
@@ -22,7 +22,6 @@ npx playwright install chromium
 |---------|---------|-----------|
 | `extract` | Analyze screenshot into layout, color, and text data | `--json`, `--no-ocr`, `--overlay`, `--fine` |
 | `compare` | Pixel + structural diff between two screenshots | `--json`, `--heatmap`, `--dom-diff` |
-| `scaffold` | Generate React+Tailwind (default) or HTML/CSS from a screenshot | `--framework`, `--styling`, `--output` |
 | `tokens` | Extract design tokens (colors, spacing, radii) | `--json` |
 | `plan` | Generate an implementation strategy | `--json` |
 | `capture` | Screenshot a URL or local HTML file | `--url`, `--file`, `--output` |
@@ -35,12 +34,6 @@ npx playwright install chromium
 ```sh
 # Extract structured data from a screenshot
 one-shot-ui extract reference.png --json
-
-# Generate a React + Tailwind component (default)
-one-shot-ui scaffold reference.png --output ./src
-
-# Or generate vanilla HTML/CSS instead
-one-shot-ui scaffold reference.png --output ./src --framework vanilla --styling css
 
 # Capture your implementation
 one-shot-ui capture --url http://localhost:3000 --output impl.png

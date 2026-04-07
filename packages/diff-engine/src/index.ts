@@ -119,6 +119,8 @@ export async function compareImages(
     referenceLayout, startX, startY
   );
 
+  const gridBreakdown = computeGridRegionBreakdown(diff.data, width, height);
+
   const issues: CompareIssue[] = [];
   if (referenceImage.width !== implementationImage.width || referenceImage.height !== implementationImage.height) {
     issues.push({
@@ -131,12 +133,35 @@ export async function compareImages(
     });
   }
 
-  const mismatchRatio = width * height === 0 ? 0 : mismatchPixels / (width * height);
+  const rawMismatchRatio = width * height === 0 ? 0 : mismatchPixels / (width * height);
+
+  // Structural similarity: compute edge density for reference and implementation
+  // to detect "empty colored boxes" that color-match but lack structural detail
+  const refEdgeCount = countEdgePixels(referencePng.data, width, height);
+  const implEdgeCount = countEdgePixels(implementationPng.data, width, height);
+  const refEdgeDensity = (width * height) > 0 ? refEdgeCount / (width * height) : 0;
+  const implEdgeDensity = (width * height) > 0 ? implEdgeCount / (width * height) : 0;
+  const edgeDensityRatio = refEdgeDensity > 0 ? implEdgeDensity / refEdgeDensity : 1;
+  const lowComplexity = edgeDensityRatio < 0.4 && refEdgeDensity > 0.01;
+  const complexityPenalty = lowComplexity ? 1.5 : 1.0;
+  const mismatchRatio = Math.min(1, rawMismatchRatio * complexityPenalty);
+
+  if (lowComplexity) {
+    issues.push({
+      code: "LOW_STRUCTURAL_COMPLEXITY",
+      severity: "high",
+      message: `Implementation has ${(edgeDensityRatio * 100).toFixed(0)}% of reference edge density — likely flat colored boxes without real content. Mismatch adjusted upward (${(rawMismatchRatio * 100).toFixed(2)}% raw → ${(mismatchRatio * 100).toFixed(2)}% adjusted).`,
+      suggestedFix: "Add text content, borders, icons, and semantic HTML elements to match the reference structure.",
+      reference: { edgeDensity: refEdgeDensity, edgePixels: refEdgeCount },
+      implementation: { edgeDensity: implEdgeDensity, edgePixels: implEdgeCount }
+    });
+  }
+
   if (mismatchRatio > 0.01) {
     issues.push({
       code: "PIXEL_DIFFERENCE",
       severity: mismatchRatio > 0.08 ? "high" : "medium",
-      message: `Pixel mismatch ratio is ${(mismatchRatio * 100).toFixed(2)}%.`,
+      message: `Pixel mismatch ratio is ${(mismatchRatio * 100).toFixed(2)}%${lowComplexity ? ` (raw: ${(rawMismatchRatio * 100).toFixed(2)}%, adjusted for low structural complexity)` : ""}.`,
       suggestedFix: "Use the structural issues below to correct layout and style mismatches before relying on pixel polish.",
       reference: { mismatchPixels },
       implementation: { mismatchRatio }
@@ -390,6 +415,12 @@ export async function compareImages(
   const groupedIssues = groupIssuesBySection(filteredIssues, referenceAnchors);
   const topEditCandidates = buildTopEditCandidates(filteredIssues, referenceAnchors, width, height);
 
+  // Compute visual hierarchy score (0-100)
+  const hierarchyScore = computeHierarchyScore(
+    referencePng.data, implementationPng.data, width, height,
+    referenceLayout, implementationLayout
+  );
+
   return compareReportSchema.parse({
     version: VERSION,
     referenceImage,
@@ -397,6 +428,15 @@ export async function compareImages(
     summary: {
       mismatchPixels,
       mismatchRatio,
+      rawMismatch: rawMismatchRatio,
+      adjustedMismatch: mismatchRatio,
+      structuralComplexity: {
+        referenceEdgeDensity: refEdgeDensity,
+        implementationEdgeDensity: implEdgeDensity,
+        edgeDensityRatio,
+        penaltyApplied: lowComplexity,
+        penaltyMultiplier: complexityPenalty,
+      },
       matchedLayoutNodes: layoutMatches.length,
       widthDelta: implementationImage.width - referenceImage.width,
       heightDelta: implementationImage.height - referenceImage.height,
@@ -407,6 +447,8 @@ export async function compareImages(
         contentRegionCount: segmented.contentRegions.length,
         irreducibleEstimate: clampedIrreducible,
       },
+      hierarchyScore,
+      gridBreakdown: gridBreakdown.length > 0 ? gridBreakdown : undefined,
     },
     issues: filteredIssues,
     groupedIssues,
@@ -417,6 +459,59 @@ export async function compareImages(
       regionHeatmaps: regionHeatmaps.length > 0 ? regionHeatmaps : undefined
     }
   });
+}
+
+/**
+ * Divide the diff image into a 3×3 grid and compute per-cell mismatch ratios.
+ * Returns cells sorted descending by contribution (share of total mismatch pixels).
+ */
+function computeGridRegionBreakdown(
+  diffData: { readonly [index: number]: number },
+  width: number,
+  height: number,
+  cols = 3,
+  rows = 3
+): Array<{ label: string; mismatchRatio: number; contribution: number }> {
+  if (width === 0 || height === 0) return [];
+
+  const regionLabels = [
+    ["top-left", "top-center", "top-right"],
+    ["center-left", "center", "center-right"],
+    ["bottom-left", "bottom-center", "bottom-right"]
+  ];
+
+  const cellMismatch = new Array<number>(cols * rows).fill(0);
+  const cellPixels = new Array<number>(cols * rows).fill(0);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const col = Math.min(cols - 1, Math.floor((x * cols) / width));
+      const row = Math.min(rows - 1, Math.floor((y * rows) / height));
+      const cellIdx = row * cols + col;
+      const idx = (y * width + x) * 4;
+      const r = diffData[idx] ?? 0;
+      const g = diffData[idx + 1] ?? 0;
+      const isMismatch = (r > 200 && g < 100) || (r < 100 && g > 120);
+      cellPixels[cellIdx]!++;
+      if (isMismatch) cellMismatch[cellIdx]!++;
+    }
+  }
+
+  const totalMismatch = cellMismatch.reduce((a, b) => a + b, 0);
+
+  return cellMismatch
+    .map((mismatch, i) => {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const label = regionLabels[row]?.[col] ?? `region-${i}`;
+      const pixels = cellPixels[i] ?? 1;
+      return {
+        label,
+        mismatchRatio: pixels > 0 ? mismatch / pixels : 0,
+        contribution: totalMismatch > 0 ? mismatch / totalMismatch : 0
+      };
+    })
+    .sort((a, b) => b.contribution - a.contribution);
 }
 
 function analyzeFocusCoverage(
@@ -657,6 +752,8 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       suggestedFix: buildRelativePositionFix(deltaX, deltaY, reference.bounds, imageWidth, imageHeight),
       reference: { x: reference.bounds.x, y: reference.bounds.y },
       implementation: { x: implementation.bounds.x, y: implementation.bounds.y },
+      deltaX,
+      deltaY,
       issueBounds: reference.bounds,
       visualWeight: vw
     });
@@ -674,10 +771,12 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
       contextPath,
       cssProperty: cssProp,
       severity: Math.abs(widthDelta) > 16 || Math.abs(heightDelta) > 16 ? "high" : "medium",
-      message: `${anchorName} size differs from the reference — adjust ${cssProp}.`,
+      message: `${anchorName} is ${Math.abs(widthDelta) > 6 ? `~${Math.abs(widthDelta)}px too ${widthDelta > 0 ? "wide" : "narrow"}` : ""}${Math.abs(widthDelta) > 6 && Math.abs(heightDelta) > 6 ? " and " : ""}${Math.abs(heightDelta) > 6 ? `~${Math.abs(heightDelta)}px too ${heightDelta > 0 ? "tall" : "short"}` : ""} (ref: ${reference.bounds.width}x${reference.bounds.height}, impl: ${implementation.bounds.width}x${implementation.bounds.height}) — adjust ${cssProp}.`,
       suggestedFix: buildRelativeSizeFix(widthDelta, heightDelta, reference.bounds),
       reference: { width: reference.bounds.width, height: reference.bounds.height },
       implementation: { width: implementation.bounds.width, height: implementation.bounds.height },
+      deltaWidth: widthDelta,
+      deltaHeight: heightDelta,
       issueBounds: reference.bounds,
       visualWeight: vw
     });
@@ -1052,6 +1151,270 @@ function hexDistance(left: string, right: string) {
   const a = hexToRgb(left);
   const b = hexToRgb(right);
   return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+}
+
+/**
+ * Simple edge detection: counts pixels with high gradient magnitude (Sobel-like).
+ * Works on RGBA PNG data. Returns the number of edge pixels.
+ */
+function countEdgePixels(data: Buffer | Uint8Array, width: number, height: number): number {
+  let edgeCount = 0;
+  const threshold = 30; // gradient magnitude threshold
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+      // Compute luminance for center and neighbors (horizontal and vertical)
+      const lum = (data[idx]! * 0.299 + data[idx + 1]! * 0.587 + data[idx + 2]! * 0.114);
+      const leftIdx = (y * width + (x - 1)) * 4;
+      const rightIdx = (y * width + (x + 1)) * 4;
+      const topIdx = ((y - 1) * width + x) * 4;
+      const bottomIdx = ((y + 1) * width + x) * 4;
+      const lumLeft = (data[leftIdx]! * 0.299 + data[leftIdx + 1]! * 0.587 + data[leftIdx + 2]! * 0.114);
+      const lumRight = (data[rightIdx]! * 0.299 + data[rightIdx + 1]! * 0.587 + data[rightIdx + 2]! * 0.114);
+      const lumTop = (data[topIdx]! * 0.299 + data[topIdx + 1]! * 0.587 + data[topIdx + 2]! * 0.114);
+      const lumBottom = (data[bottomIdx]! * 0.299 + data[bottomIdx + 1]! * 0.587 + data[bottomIdx + 2]! * 0.114);
+      const gx = Math.abs(lumRight - lumLeft);
+      const gy = Math.abs(lumBottom - lumTop);
+      if (gx + gy > threshold) {
+        edgeCount++;
+      }
+    }
+  }
+  return edgeCount;
+}
+
+/**
+ * Compute a 0-100 visual hierarchy score comparing structural quality
+ * between reference and implementation images. Uses three signals:
+ * 1. Zone similarity - horizontal band detection at similar vertical positions
+ * 2. Content distribution entropy - Shannon entropy of pixel variance per 8x8 grid cell
+ * 3. Edge density distribution - spatial distribution of edges across quadrants
+ */
+function computeHierarchyScore(
+  refData: Buffer | Uint8Array,
+  implData: Buffer | Uint8Array,
+  width: number,
+  height: number,
+  refLayout: LayoutNode[],
+  implLayout: LayoutNode[]
+): number {
+  if (width === 0 || height === 0) return 50;
+
+  // 1. Zone similarity (0-100): Check horizontal bands match
+  const zoneSimilarity = computeZoneSimilarity(refData, implData, width, height);
+
+  // 2. Content distribution entropy correlation (0-100)
+  const entropyCorrelation = computeEntropyCorrelation(refData, implData, width, height);
+
+  // 3. Edge density distribution match across quadrants (0-100)
+  const edgeDistributionMatch = computeEdgeDistributionMatch(refData, implData, width, height);
+
+  return Math.round(
+    0.4 * zoneSimilarity + 0.3 * entropyCorrelation + 0.3 * edgeDistributionMatch
+  );
+}
+
+/**
+ * Detect horizontal bands by computing average luminance per row-band,
+ * finding transition points, and comparing between ref and impl.
+ */
+function computeZoneSimilarity(
+  refData: Buffer | Uint8Array,
+  implData: Buffer | Uint8Array,
+  width: number,
+  height: number
+): number {
+  const bandCount = 20; // divide into 20 horizontal bands
+  const bandHeight = Math.max(1, Math.floor(height / bandCount));
+
+  const refBandLum: number[] = [];
+  const implBandLum: number[] = [];
+
+  for (let b = 0; b < bandCount; b++) {
+    const yStart = b * bandHeight;
+    const yEnd = Math.min(yStart + bandHeight, height);
+    let refSum = 0, implSum = 0, count = 0;
+    for (let y = yStart; y < yEnd; y++) {
+      for (let x = 0; x < width; x += 4) { // sample every 4th pixel for speed
+        const idx = (y * width + x) * 4;
+        refSum += refData[idx]! * 0.299 + refData[idx + 1]! * 0.587 + refData[idx + 2]! * 0.114;
+        implSum += implData[idx]! * 0.299 + implData[idx + 1]! * 0.587 + implData[idx + 2]! * 0.114;
+        count++;
+      }
+    }
+    refBandLum.push(count > 0 ? refSum / count : 0);
+    implBandLum.push(count > 0 ? implSum / count : 0);
+  }
+
+  // Find transitions (significant luminance changes between adjacent bands)
+  const refTransitions = findTransitions(refBandLum);
+  const implTransitions = findTransitions(implBandLum);
+
+  // Score: how many reference transitions have a nearby match in implementation
+  if (refTransitions.length === 0) return 80; // no structure to compare
+  let matched = 0;
+  for (const rt of refTransitions) {
+    const closest = implTransitions.reduce((best, it) => Math.abs(it - rt) < Math.abs(best - rt) ? it : best, implTransitions[0] ?? -999);
+    if (Math.abs(closest - rt) <= 2) matched++;
+  }
+  const transitionScore = matched / refTransitions.length;
+
+  // Also compare band luminance correlation
+  const lumCorr = pearsonCorrelation(refBandLum, implBandLum);
+
+  return Math.round(50 * transitionScore + 50 * Math.max(0, lumCorr));
+}
+
+function findTransitions(bandLum: number[]): number[] {
+  const transitions: number[] = [];
+  const threshold = 15; // luminance change threshold
+  for (let i = 1; i < bandLum.length; i++) {
+    if (Math.abs(bandLum[i]! - bandLum[i - 1]!) > threshold) {
+      transitions.push(i);
+    }
+  }
+  return transitions;
+}
+
+/**
+ * Compute Shannon entropy of pixel variance in an 8x8 grid,
+ * then correlate between reference and implementation.
+ */
+function computeEntropyCorrelation(
+  refData: Buffer | Uint8Array,
+  implData: Buffer | Uint8Array,
+  width: number,
+  height: number
+): number {
+  const gridSize = 8;
+  const cellW = Math.max(1, Math.floor(width / gridSize));
+  const cellH = Math.max(1, Math.floor(height / gridSize));
+
+  const refEntropy: number[] = [];
+  const implEntropy: number[] = [];
+
+  for (let gy = 0; gy < gridSize; gy++) {
+    for (let gx = 0; gx < gridSize; gx++) {
+      const xStart = gx * cellW;
+      const yStart = gy * cellH;
+      const xEnd = Math.min(xStart + cellW, width);
+      const yEnd = Math.min(yStart + cellH, height);
+
+      refEntropy.push(computeCellEntropy(refData, width, xStart, yStart, xEnd, yEnd));
+      implEntropy.push(computeCellEntropy(implData, width, xStart, yStart, xEnd, yEnd));
+    }
+  }
+
+  const corr = pearsonCorrelation(refEntropy, implEntropy);
+  return Math.round(Math.max(0, corr) * 100);
+}
+
+function computeCellEntropy(
+  data: Buffer | Uint8Array,
+  width: number,
+  xStart: number, yStart: number, xEnd: number, yEnd: number
+): number {
+  // Compute variance of luminance values as a proxy for content density
+  const lums: number[] = [];
+  for (let y = yStart; y < yEnd; y += 2) { // sample every 2nd pixel
+    for (let x = xStart; x < xEnd; x += 2) {
+      const idx = (y * width + x) * 4;
+      lums.push(data[idx]! * 0.299 + data[idx + 1]! * 0.587 + data[idx + 2]! * 0.114);
+    }
+  }
+  if (lums.length === 0) return 0;
+  const mean = lums.reduce((s, v) => s + v, 0) / lums.length;
+  const variance = lums.reduce((s, v) => s + (v - mean) ** 2, 0) / lums.length;
+  return Math.sqrt(variance); // standard deviation as entropy proxy
+}
+
+/**
+ * Compare edge density distribution across 4 quadrants.
+ */
+function computeEdgeDistributionMatch(
+  refData: Buffer | Uint8Array,
+  implData: Buffer | Uint8Array,
+  width: number,
+  height: number
+): number {
+  const halfW = Math.floor(width / 2);
+  const halfH = Math.floor(height / 2);
+  const quadrants = [
+    { x: 0, y: 0, w: halfW, h: halfH },
+    { x: halfW, y: 0, w: width - halfW, h: halfH },
+    { x: 0, y: halfH, w: halfW, h: height - halfH },
+    { x: halfW, y: halfH, w: width - halfW, h: height - halfH },
+  ];
+
+  const refQuadEdges: number[] = [];
+  const implQuadEdges: number[] = [];
+
+  for (const q of quadrants) {
+    refQuadEdges.push(countEdgePixelsInRegion(refData, width, height, q.x, q.y, q.w, q.h));
+    implQuadEdges.push(countEdgePixelsInRegion(implData, width, height, q.x, q.y, q.w, q.h));
+  }
+
+  // Normalize to proportions
+  const refTotal = refQuadEdges.reduce((s, v) => s + v, 0) || 1;
+  const implTotal = implQuadEdges.reduce((s, v) => s + v, 0) || 1;
+  const refProps = refQuadEdges.map(v => v / refTotal);
+  const implProps = implQuadEdges.map(v => v / implTotal);
+
+  // Compute similarity as 1 - mean absolute difference of proportions
+  const diff = refProps.reduce((s, v, i) => s + Math.abs(v - implProps[i]!), 0) / 4;
+  // Also factor in overall edge density ratio
+  const densityRatio = Math.min(refTotal, implTotal) / Math.max(refTotal, implTotal);
+
+  return Math.round((1 - diff) * 60 + densityRatio * 40);
+}
+
+function countEdgePixelsInRegion(
+  data: Buffer | Uint8Array,
+  width: number, height: number,
+  rx: number, ry: number, rw: number, rh: number
+): number {
+  let edgeCount = 0;
+  const threshold = 30;
+  for (let y = Math.max(1, ry); y < Math.min(height - 1, ry + rh); y++) {
+    for (let x = Math.max(1, rx); x < Math.min(width - 1, rx + rw); x++) {
+      const idx = (y * width + x) * 4;
+      const lum = data[idx]! * 0.299 + data[idx + 1]! * 0.587 + data[idx + 2]! * 0.114;
+      const leftIdx = (y * width + (x - 1)) * 4;
+      const rightIdx = (y * width + (x + 1)) * 4;
+      const topIdx = ((y - 1) * width + x) * 4;
+      const bottomIdx = ((y + 1) * width + x) * 4;
+      const gx = Math.abs(
+        (data[rightIdx]! * 0.299 + data[rightIdx + 1]! * 0.587 + data[rightIdx + 2]! * 0.114) -
+        (data[leftIdx]! * 0.299 + data[leftIdx + 1]! * 0.587 + data[leftIdx + 2]! * 0.114)
+      );
+      const gy = Math.abs(
+        (data[bottomIdx]! * 0.299 + data[bottomIdx + 1]! * 0.587 + data[bottomIdx + 2]! * 0.114) -
+        (data[topIdx]! * 0.299 + data[topIdx + 1]! * 0.587 + data[topIdx + 2]! * 0.114)
+      );
+      if (gx + gy > threshold) edgeCount++;
+    }
+  }
+  return edgeCount;
+}
+
+/**
+ * Pearson correlation coefficient between two arrays.
+ */
+function pearsonCorrelation(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  if (n === 0) return 0;
+  const meanA = a.reduce((s, v) => s + v, 0) / n;
+  const meanB = b.reduce((s, v) => s + v, 0) / n;
+  let num = 0, denA = 0, denB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i]! - meanA;
+    const db = b[i]! - meanB;
+    num += da * db;
+    denA += da * da;
+    denB += db * db;
+  }
+  const den = Math.sqrt(denA * denB);
+  return den === 0 ? 0 : num / den;
 }
 
 function hexToRgb(hex: string) {

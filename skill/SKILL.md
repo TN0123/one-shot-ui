@@ -1,13 +1,12 @@
 ---
 name: one-shot-ui
 description: >
-  Extract UI designs from screenshots, generate React + Tailwind components
-  (or HTML/CSS), and iteratively refine implementations to match a reference
-  image pixel-perfectly.
+  Extract UI designs from screenshots and iteratively refine implementations
+  to match a reference image pixel-perfectly using comparison and fix suggestions.
 ---
 
-You have access to the `one-shot-ui` CLI tool. Use it to implement UIs from
-reference screenshots with high fidelity.
+You have access to the `one-shot-ui` CLI tool. Use it to analyze reference
+screenshots and compare your implementations against them.
 
 ## When to Use
 
@@ -25,19 +24,14 @@ Run `one-shot-ui extract <reference.png> --json --overlay` to get:
 - Component clusters (repeated visual patterns)
 - Implementation plan (suggested CSS strategy: grid/flex/absolute)
 
-### Step 2: Scaffold starter code
-Run `one-shot-ui scaffold <reference.png> --output ./src` to generate a
-React + Tailwind component (the default). For vanilla HTML/CSS instead, add
-`--framework vanilla --styling css`.
-
-### Step 3: Implement and refine
-Edit the scaffold to match the design. Use the extracted data to set exact:
+### Step 2: Build the UI
+Use the extracted data to write the implementation directly. Set exact:
 - Colors (hex values from extraction)
 - Spacing (px values from spacing measurements)
 - Typography (font sizes, weights from text blocks)
 - Border radii, shadows, gradients (from style extraction)
 
-### Step 4: Compare
+### Step 3: Compare
 Run `one-shot-ui capture --url http://localhost:3000 --output impl.png` then
 `one-shot-ui compare <reference.png> impl.png --json --heatmap heatmap.png`.
 
@@ -46,7 +40,7 @@ Read the heatmap to see where differences are. The JSON report includes:
 - `issues[]` — categorized problems (COLOR_MISMATCH, SPACING_MISMATCH, etc.)
 - `topEditCandidates[]` — ranked list of what to fix first
 
-### Step 5: Fix issues
+### Step 4: Fix issues
 Run `one-shot-ui suggest-fixes <reference.png> impl.png --json` to get specific
 Tailwind/CSS fix suggestions. Apply them and re-compare.
 

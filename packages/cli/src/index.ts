@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, extname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, stat, rm } from "node:fs/promises";
 import { execSync } from "node:child_process";
@@ -118,8 +118,9 @@ program
 
 program
   .command("compare")
-  .argument("<referencePath>", "Path to the reference screenshot or HTML file")
+  .argument("[referencePath]", "Path to the reference screenshot or HTML file")
   .argument("[implementationPath]", "Path to the implementation screenshot or HTML file")
+  .option("--reference <path>", "Path to reference screenshot or HTML file (alternative to positional arg)")
   .option("--implementation <path>", "Path to the implementation screenshot or HTML file (alternative to positional arg)")
   .option("--json", "Print full JSON report", false)
   .option("--heatmap <path>", "Path to write the diff heatmap")
@@ -132,11 +133,30 @@ program
   .option("--previous-mismatch <ratios>", "Comma-separated previous mismatch ratios (e.g. '0.15,0.10') for regression/plateau detection")
   .option("--summary", "Print a single human-readable summary line", false)
   .option("--top-fixes <n>", "Print N highest-impact actionable fixes as plain text", "0")
+  .addHelpText("after", `
+Examples:
+  one-shot-ui compare reference.png implementation.png
+  one-shot-ui compare --reference reference.png --implementation implementation.png
+  one-shot-ui compare reference.png implementation.html --heatmap diff.png
+  one-shot-ui compare reference.png impl.png --top-fixes 5 --summary`)
   .action(async (referencePath, implementationPath, options) => {
+    // Resolve reference path from positional arg or --reference flag
+    const resolvedRefPath = referencePath ?? options.reference;
+    if (!resolvedRefPath) {
+      console.error("Error: reference path is required.");
+      console.error("");
+      console.error("Usage: one-shot-ui compare <reference.png> <implementation.png>");
+      console.error("   or: one-shot-ui compare --reference reference.png --implementation implementation.png");
+      process.exit(1);
+    }
+
     // Resolve implementation path from positional arg or --implementation flag
     const resolvedImplPath = implementationPath ?? options.implementation;
     if (!resolvedImplPath) {
-      console.error("Error: implementation path is required. Pass it as a second argument or use --implementation <path>.");
+      console.error("Error: implementation path is required.");
+      console.error("");
+      console.error("Usage: one-shot-ui compare <reference.png> <implementation.png>");
+      console.error("   or: one-shot-ui compare --reference reference.png --implementation implementation.png");
       process.exit(1);
     }
 
@@ -144,12 +164,12 @@ program
     const htmlExts = [".html", ".htm"];
     const tmpCaptures: string[] = [];
 
-    let effectiveRefPath = referencePath;
-    if (htmlExts.some(ext => referencePath.toLowerCase().endsWith(ext))) {
+    let effectiveRefPath = resolvedRefPath;
+    if (htmlExts.some(ext => resolvedRefPath.toLowerCase().endsWith(ext))) {
       // Reference is HTML — capture it (use default 1280x800 viewport)
-      const captureDest = referencePath.replace(/\.(html|htm)$/i, ".ref-capture.png");
-      console.error(`Auto-capturing reference HTML: ${referencePath} → ${captureDest}`);
-      await captureScreenshot({ filePath: resolve(referencePath), outputPath: resolve(captureDest), width: 1280, height: 800, deviceScaleFactor: 1, skipBlankCheck: false });
+      const captureDest = resolvedRefPath.replace(/\.(html|htm)$/i, ".ref-capture.png");
+      console.error(`Auto-capturing reference HTML: ${resolvedRefPath} → ${captureDest}`);
+      await captureScreenshot({ filePath: resolve(resolvedRefPath), outputPath: resolve(captureDest), width: 1280, height: 800, deviceScaleFactor: 1, skipBlankCheck: false });
       effectiveRefPath = captureDest;
       tmpCaptures.push(captureDest);
     }
@@ -171,17 +191,17 @@ program
       tmpCaptures.push(captureDest);
     }
 
-    referencePath = effectiveRefPath;
+    const finalRefPath = effectiveRefPath;
 
     // Auto-resize: if enabled, check dimensions and resize implementation to match reference
     let effectiveImplPath = effectiveImplPathResolved;
     if (options.autoResize) {
-      const refDims = await readImageDimensions(resolve(referencePath));
-      const implDims = await readImageDimensions(resolve(implementationPath));
+      const refDims = await readImageDimensions(resolve(finalRefPath));
+      const implDims = await readImageDimensions(resolve(resolvedImplPath));
       if (refDims.width !== implDims.width || refDims.height !== implDims.height) {
         const sharp = (await import("sharp")).default;
-        const resizedPath = implementationPath.replace(/(\.\w+)$/, `-resized$1`);
-        await sharp(resolve(implementationPath))
+        const resizedPath = resolvedImplPath.replace(/(\.\w+)$/, `-resized$1`);
+        await sharp(resolve(resolvedImplPath))
           .resize(refDims.width, refDims.height, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
           .toFile(resolve(resizedPath));
         console.error(`⚠ Auto-resized implementation from ${implDims.width}x${implDims.height} to ${refDims.width}x${refDims.height} (saved to ${resizedPath})`);
@@ -197,12 +217,12 @@ program
       crop: parseCropBounds(options.crop)
     };
 
-    const report = await compareImages(referencePath, effectiveImplPath, compareOpts);
+    const report = await compareImages(finalRefPath, effectiveImplPath, compareOpts);
 
     // DOM-level comparison if requested
     if (options.domDiff) {
       try {
-        const referenceReport = await extractImageReport(referencePath, {
+        const referenceReport = await extractImageReport(finalRefPath, {
           disableOcr: options.ocr === false
         });
         const isFile = !options.domDiff.startsWith("http");
@@ -219,7 +239,7 @@ program
     }
 
     // Regression and plateau detection from previous mismatch ratios
-    const regressionInfo: { regressionWarning?: string; regressionDelta?: number; plateauDetected?: boolean; plateauBreakdown?: string } = {};
+    const regressionInfo: { regressionWarning?: string; regressionDelta?: number; plateauDetected?: boolean; plateauBreakdown?: string; sessionBestWarning?: string } = {};
     if (options.previousMismatch) {
       const previousRatios = options.previousMismatch
         .split(",")
@@ -234,6 +254,15 @@ program
           const delta = currentRatio - lastRatio;
           regressionInfo.regressionWarning = `Mismatch increased by ${(delta * 100).toFixed(2)}pp (${(lastRatio * 100).toFixed(2)}% → ${(currentRatio * 100).toFixed(2)}%). Consider reverting the last change.`;
           regressionInfo.regressionDelta = delta;
+        }
+
+        // Session-best regression: warn when current is worse than ANY prior pass
+        const sessionBest = Math.min(...previousRatios);
+        const sessionBestPassIdx = previousRatios.indexOf(sessionBest) + 1; // 1-indexed pass number
+        if (currentRatio > sessionBest) {
+          const topRegion = report.summary.gridBreakdown?.[0]?.label;
+          const regionHint = topRegion ? ` Top regressed region: ${topRegion}.` : "";
+          regressionInfo.sessionBestWarning = `⚠ REGRESSION: ${(currentRatio * 100).toFixed(1)}% is worse than your session best of ${(sessionBest * 100).toFixed(1)}% (pass ${sessionBestPassIdx}). Revert recent changes before continuing.${regionHint}`;
         }
       }
 
@@ -254,7 +283,10 @@ program
     }
 
     if (options.summary) {
-      const ratio = (report.summary.mismatchRatio * 100).toFixed(1);
+      const adjustedMismatch = report.summary.adjustedMismatch ?? report.summary.mismatchRatio;
+      const rawMismatch = report.summary.rawMismatch ?? report.summary.mismatchRatio;
+      const hierarchyScore = report.summary.hierarchyScore ?? 100;
+      const ratio = (adjustedMismatch * 100).toFixed(1);
       const dimStatus = report.issues.find(i => i.code === "DIMENSION_MISMATCH") ? "MISMATCH" : "OK";
       const topIssues = report.issues
         .filter(i => i.code !== "DIMENSION_MISMATCH" && i.code !== "PIXEL_DIFFERENCE")
@@ -264,8 +296,33 @@ program
       const segInfo = report.summary.segmented
         ? ` | Structural: ${(report.summary.segmented.structuralMismatch * 100).toFixed(1)}%`
         : "";
-      let summaryLine = `Mismatch: ${ratio}% | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`;
-      if (regressionInfo.regressionWarning) {
+      // Show both adjusted and raw when they differ significantly
+      const adjustedTag = Math.abs(adjustedMismatch - rawMismatch) > 0.005
+        ? ` (raw: ${(rawMismatch * 100).toFixed(1)}%, adjusted for low structural complexity)`
+        : "";
+      let summaryLine = `Mismatch: ${ratio}%${adjustedTag} | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`;
+      if (hierarchyScore < 50) {
+        summaryLine += ` | Warning: Low visual hierarchy score (${hierarchyScore}/100) — implementation may be missing structural content.`;
+      }
+      // Surface large node count gap in summary line
+      {
+        const lcIssue = report.issues.find(i => i.code === "LAYOUT_COUNT_MISMATCH");
+        if (lcIssue) {
+          const rcSumm = (lcIssue.reference as any)?.layoutNodes as number | undefined;
+          const icSumm = (lcIssue.implementation as any)?.layoutNodes as number | undefined;
+          if (rcSumm != null && icSumm != null && rcSumm - icSumm > 10) {
+            summaryLine += ` | STRUCTURE: ${rcSumm} ref nodes vs ${icSumm} built — ${rcSumm - icSumm} may be missing`;
+          }
+        }
+      }
+      // Top mismatch region in summary
+      if (report.summary.gridBreakdown?.length) {
+        const top = report.summary.gridBreakdown[0]!;
+        summaryLine += ` | TOP_REGION: ${top.label} (${(top.mismatchRatio * 100).toFixed(1)}% mismatch, ${(top.contribution * 100).toFixed(0)}% of total)`;
+      }
+      if (regressionInfo.sessionBestWarning) {
+        summaryLine += ` | ${regressionInfo.sessionBestWarning}`;
+      } else if (regressionInfo.regressionWarning) {
         summaryLine += ` | REGRESSION_WARNING: ${regressionInfo.regressionWarning}`;
       }
       if (regressionInfo.plateauDetected) {
@@ -277,7 +334,7 @@ program
 
     if (options.json) {
       const output: any = { ...report };
-      if (regressionInfo.regressionWarning || regressionInfo.plateauDetected) {
+      if (regressionInfo.regressionWarning || regressionInfo.plateauDetected || regressionInfo.sessionBestWarning) {
         output.regressionDetection = regressionInfo;
       }
       console.log(JSON.stringify(output, null, 2));
@@ -285,7 +342,9 @@ program
     }
 
     // Surface regression/plateau warnings before other output
-    if (regressionInfo.regressionWarning) {
+    if (regressionInfo.sessionBestWarning) {
+      console.log(regressionInfo.sessionBestWarning);
+    } else if (regressionInfo.regressionWarning) {
       console.log(`⚠ REGRESSION_WARNING: ${regressionInfo.regressionWarning}`);
     }
     if (regressionInfo.plateauDetected) {
@@ -300,20 +359,37 @@ program
       const impl = dimIssue.implementation as { width: number; height: number } | undefined;
       console.log(`⚠ DIMENSION WARNING: Reference is ${ref?.width}x${ref?.height} but implementation is ${impl?.width}x${impl?.height}.`);
       console.log(`  This inflates the mismatch ratio. Re-capture with:`);
-      console.log(`    one-shot-ui capture --file <impl> --output <out> --match-reference ${referencePath}`);
+      console.log(`    one-shot-ui capture --file <impl> --output <out> --match-reference ${finalRefPath}`);
       console.log(`  Or manually: one-shot-ui capture --file <impl> --output <out> --width ${ref?.width} --height ${ref?.height}\n`);
     }
 
-    if (report.summary.segmented?.irreducibleEstimate != null) {
-      const seg = report.summary.segmented;
-      const actionable = Math.max(0, report.summary.mismatchRatio - (seg.irreducibleEstimate ?? 0));
-      console.log(`Mismatch: ${(report.summary.mismatchRatio * 100).toFixed(1)}% (estimated actionable: ~${(actionable * 100).toFixed(1)}%, irreducible content: ~${((seg.irreducibleEstimate ?? 0) * 100).toFixed(1)}%)`);
-      console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content: ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
-    } else {
-      console.log(`Mismatch ratio: ${(report.summary.mismatchRatio * 100).toFixed(2)}%`);
-      if (report.summary.segmented) {
+    {
+      const cmpAdjusted = report.summary.adjustedMismatch ?? report.summary.mismatchRatio;
+      const cmpRaw = report.summary.rawMismatch ?? report.summary.mismatchRatio;
+      const cmpHierarchy = report.summary.hierarchyScore ?? 100;
+      if (report.summary.segmented?.irreducibleEstimate != null) {
         const seg = report.summary.segmented;
-        console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content (irreducible): ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+        const actionable = Math.max(0, cmpAdjusted - (seg.irreducibleEstimate ?? 0));
+        if (Math.abs(cmpAdjusted - cmpRaw) > 0.005) {
+          console.log(`Mismatch: ${(cmpAdjusted * 100).toFixed(1)}% (raw: ${(cmpRaw * 100).toFixed(1)}%, adjusted for low structural complexity)`);
+        } else {
+          console.log(`Mismatch: ${(cmpAdjusted * 100).toFixed(1)}%`);
+        }
+        console.log(`  Estimated actionable: ~${(actionable * 100).toFixed(1)}%, irreducible content: ~${((seg.irreducibleEstimate ?? 0) * 100).toFixed(1)}%`);
+        console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content: ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+      } else {
+        if (Math.abs(cmpAdjusted - cmpRaw) > 0.005) {
+          console.log(`Mismatch: ${(cmpAdjusted * 100).toFixed(2)}% (raw: ${(cmpRaw * 100).toFixed(2)}%, adjusted for low structural complexity)`);
+        } else {
+          console.log(`Mismatch ratio: ${(cmpAdjusted * 100).toFixed(2)}%`);
+        }
+        if (report.summary.segmented) {
+          const seg = report.summary.segmented;
+          console.log(`  Structural: ${(seg.structuralMismatch * 100).toFixed(2)}% | Content (irreducible): ${(seg.contentMismatch * 100).toFixed(2)}% (${seg.contentRegionCount} regions)`);
+        }
+      }
+      if (cmpHierarchy < 50) {
+        console.log(`Warning: Low visual hierarchy score (${cmpHierarchy}/100) — implementation may be missing structural content.`);
       }
     }
     console.log(`Issues: ${report.issues.length}`);
@@ -341,6 +417,28 @@ program
         }
       }
     }
+    // Surface layout node count gap prominently when reference has 10+ more nodes
+    const layoutCountIssue = report.issues.find(i => i.code === "LAYOUT_COUNT_MISMATCH");
+    if (layoutCountIssue) {
+      const refCount = (layoutCountIssue.reference as any)?.layoutNodes as number | undefined;
+      const implCount = (layoutCountIssue.implementation as any)?.layoutNodes as number | undefined;
+      if (refCount != null && implCount != null && refCount - implCount > 10) {
+        console.log(`Structure: ${refCount} reference nodes vs ${implCount} built nodes — ${refCount - implCount} elements may be missing.`);
+      }
+    }
+
+    // Per-region mismatch breakdown (3×3 grid, top 4 by contribution)
+    if (report.summary.gridBreakdown?.length) {
+      const top4 = report.summary.gridBreakdown.slice(0, 4);
+      console.log(`\nRegion breakdown (top 4 by mismatch contribution):`);
+      const maxBarWidth = 12;
+      for (const r of top4) {
+        const barLen = Math.max(0, Math.round(r.contribution * maxBarWidth));
+        const bar = "█".repeat(barLen);
+        console.log(`  ${r.label.padEnd(16)} ${(r.mismatchRatio * 100).toFixed(1).padStart(5)}%  ${bar}`);
+      }
+    }
+
     if (report.artifacts.heatmapPath) {
       console.log(`Heatmap: ${report.artifacts.heatmapPath}`);
     }
@@ -348,16 +446,31 @@ program
     // --top-fixes: print N highest-impact actionable fixes as plain text
     const topFixesCount = Number.parseInt(options.topFixes, 10);
     if (topFixesCount > 0 && report.topEditCandidates?.length) {
-      console.log(`\n── Top ${topFixesCount} Actionable Fixes ──`);
-      for (const candidate of report.topEditCandidates.slice(0, topFixesCount)) {
-        const selector = candidate.cssSelector ? ` on ${candidate.cssSelector}` : "";
-        const anchor = candidate.anchorName ? ` (${candidate.anchorName})` : "";
-        const riskWarning = (candidate as any).risk === "high"
-          ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
+      // Suppress fixes when mismatch is within 2× irreducible estimate
+      const irrEst = report.summary.segmented?.irreducibleEstimate;
+      const tfAdjusted = report.summary.adjustedMismatch ?? report.summary.mismatchRatio;
+      const tfHierarchy = report.summary.hierarchyScore ?? 100;
+      if (tfHierarchy < 30) {
+        console.log(`\n⚠ Implementation appears structurally incomplete (hierarchy score: ${tfHierarchy}/100) — add missing sections, text content, and visual hierarchy before fine-tuning spacing/colors.`);
+      }
+      if (irrEst != null && tfAdjusted < 1.4 * irrEst) {
+        const topRegionHint = report.summary.gridBreakdown?.[0]?.label;
+        const nearMsg = topRegionHint
+          ? ` Near convergence floor — 1-2 targeted passes recommended, focusing on: ${topRegionHint}.`
           : "";
-        console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}${riskWarning}`);
-        for (const css of candidate.cssChanges.slice(1)) {
-          console.log(`   ${css}`);
+        console.log(`\nMismatch (${(tfAdjusted * 100).toFixed(1)}%) is within 1.4× of irreducible floor (${(irrEst * 100).toFixed(1)}%). Remaining differences are likely font rendering, anti-aliasing, and image content. No further CSS changes recommended.${nearMsg}`);
+      } else {
+        console.log(`\n── Top ${topFixesCount} Actionable Fixes ──`);
+        for (const candidate of report.topEditCandidates.slice(0, topFixesCount)) {
+          const selector = candidate.cssSelector ? ` on ${candidate.cssSelector}` : "";
+          const anchor = candidate.anchorName ? ` (${candidate.anchorName})` : "";
+          const riskWarning = (candidate as any).risk === "high"
+            ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
+            : "";
+          console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}${riskWarning}`);
+          for (const css of candidate.cssChanges.slice(1)) {
+            console.log(`   ${css}`);
+          }
         }
       }
     }
@@ -420,222 +533,66 @@ program
   });
 
 program
-  .command("scaffold")
-  .argument("<imagePath>", "Path to the reference screenshot")
-  .option("--json", "Print full JSON report", false)
-  .option("--react", "Generate React component hierarchy (legacy CSS modules)", false)
-  .option("--framework <framework>", "Output framework: react (default) or vanilla", "react")
-  .option("--styling <styling>", "Styling approach: tailwind (default) or css", "tailwind")
-  .option("--no-ocr", "Disable OCR text extraction")
-  .option("--output <dir>", "Directory or file path to write scaffold files")
-  .option("--mode <mode>", "Scaffold layout mode: absolute or structured", "structured")
-  .action(async (imagePath, options) => {
-    const report = await extractImageReport(imagePath, {
-      disableOcr: options.ocr === false
-    });
-
-    const { generateHtmlScaffold, generateReactScaffold, generateTailwindReactScaffold } = await import("@one-shot-ui/core/scaffold");
-
-    const framework: string = options.framework ?? "react";
-    const styling: string = options.styling ?? "tailwind";
-
-    // React + Tailwind is the default and preferred path
-    if (framework === "react" && styling === "tailwind") {
-      const tailwindResult = generateTailwindReactScaffold(
-        report.implementationPlan!,
-        report.semanticAnchors ?? [],
-        report.tokens ?? [],
-        report.layout,
-        report.text,
-        report.components
-      );
-
-      if (options.output) {
-        const outputPath = resolve(options.output);
-
-        if (outputPath.endsWith(".tsx") || outputPath.endsWith(".jsx")) {
-          // Write as a single file
-          try {
-            const existing = await stat(outputPath);
-            if (existing.isDirectory()) {
-              await rm(outputPath, { recursive: true });
-            }
-          } catch { /* doesn't exist yet */ }
-
-          await mkdir(dirname(outputPath), { recursive: true });
-          await writeFile(outputPath, tailwindResult.tsx, "utf8");
-          console.log(`React + Tailwind scaffold written to ${outputPath}`);
-        } else if (outputPath.endsWith(".html") || outputPath.endsWith(".htm")) {
-          // Wrap in a self-contained HTML file with Tailwind CDN for preview
-          const htmlWrapped = wrapTailwindReactAsHtml(tailwindResult.tsx);
-          try {
-            const existing = await stat(outputPath);
-            if (existing.isDirectory()) {
-              await rm(outputPath, { recursive: true });
-            }
-          } catch { /* doesn't exist yet */ }
-
-          await mkdir(dirname(outputPath), { recursive: true });
-          await writeFile(outputPath, htmlWrapped, "utf8");
-
-          const written = await stat(outputPath);
-          if (!written.isFile()) {
-            throw new Error(`Scaffold output path "${outputPath}" is not a regular file.`);
-          }
-          // Also write the .tsx alongside
-          const tsxPath = outputPath.replace(/\.html?$/i, ".tsx");
-          await writeFile(tsxPath, tailwindResult.tsx, "utf8");
-          console.log(`React + Tailwind scaffold written to ${outputPath} (+ ${tsxPath})`);
-        } else {
-          // Treat as directory
-          await mkdir(outputPath, { recursive: true });
-          await writeFile(resolve(outputPath, tailwindResult.filePath), tailwindResult.tsx, "utf8");
-          // Also write an HTML preview
-          const htmlWrapped = wrapTailwindReactAsHtml(tailwindResult.tsx);
-          await writeFile(resolve(outputPath, "index.html"), htmlWrapped, "utf8");
-          console.log(`React + Tailwind scaffold written to ${outputPath}/`);
-        }
-        return;
-      }
-
-      if (options.json) {
-        console.log(JSON.stringify({ version: VERSION, framework: "react", styling: "tailwind", scaffold: tailwindResult }, null, 2));
-        return;
-      }
-
-      console.log(tailwindResult.tsx);
-      return;
-    }
-
-    // Vanilla HTML/CSS path (fallback)
-    const scaffold = generateHtmlScaffold(
-      report.implementationPlan!,
-      report.semanticAnchors ?? [],
-      report.tokens ?? [],
-      report.layout,
-      report.text,
-      options.mode ?? "structured"
-    );
-
-    if (options.react) {
-      const reactOutput = generateReactScaffold(
-        report.implementationPlan!,
-        report.semanticAnchors ?? [],
-        report.tokens ?? [],
-        report.layout,
-        report.text,
-        report.components
-      );
-      scaffold.react = reactOutput;
-    }
-
-    if (options.output) {
-      const outputPath = resolve(options.output);
-
-      // If the output path looks like an HTML file, write directly as a file
-      if (outputPath.endsWith(".html") || outputPath.endsWith(".htm")) {
-        // Safety: if a directory exists at the target path (from a previous bad run), remove it
-        try {
-          const existing = await stat(outputPath);
-          if (existing.isDirectory()) {
-            await rm(outputPath, { recursive: true });
-          }
-        } catch {
-          // Path doesn't exist yet — that's fine
-        }
-
-        await mkdir(dirname(outputPath), { recursive: true });
-        await writeFile(outputPath, scaffold.html, "utf8");
-
-        // Verify the output is a regular file, not a directory
-        const written = await stat(outputPath);
-        if (!written.isFile()) {
-          throw new Error(`Scaffold output path "${outputPath}" is not a regular file. Check for conflicting directories.`);
-        }
-
-        // Write CSS alongside
-        const cssPath = outputPath.replace(/\.html?$/i, ".css");
-        await writeFile(cssPath, scaffold.css, "utf8");
-
-        if (scaffold.react) {
-          const reactDir = dirname(outputPath);
-          for (const file of scaffold.react.files) {
-            const filePath = resolve(reactDir, file.path);
-            await mkdir(dirname(filePath), { recursive: true });
-            await writeFile(filePath, file.content, "utf8");
-          }
-        }
-
-        console.log(`Scaffold written to ${outputPath}`);
-      } else {
-        // Treat as directory
-        const outputDir = outputPath;
-        await mkdir(outputDir, { recursive: true });
-        await writeFile(resolve(outputDir, "index.html"), scaffold.html, "utf8");
-        await writeFile(resolve(outputDir, "styles.css"), scaffold.css, "utf8");
-
-        if (scaffold.react) {
-          for (const file of scaffold.react.files) {
-            const filePath = resolve(outputDir, file.path);
-            await mkdir(dirname(filePath), { recursive: true });
-            await writeFile(filePath, file.content, "utf8");
-          }
-        }
-
-        console.log(`Scaffold written to ${outputDir}`);
-      }
-
-      if (scaffold.react) {
-        console.log(`React files: ${scaffold.react.files.length}`);
-      }
-      return;
-    }
-
-    if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, framework: "vanilla", styling: "css", scaffold }, null, 2));
-      return;
-    }
-
-    console.log(scaffold.html);
-  });
-
-program
   .command("run")
   .argument("[referencePath]", "Path to the reference screenshot")
   .argument("[implementationPath]", "Path to implementation HTML file or URL (alternative to --impl)")
   .option("--impl <path>", "Path to implementation HTML file or URL")
+  .option("--implementation <path>", "Alias for --impl")
   .option("--file <path>", "Alias for --impl")
-  .option("--reference <path>", "Alias for the referencePath argument (ignored if positional arg given)")
-  .option("--output <dir>", "Working directory for intermediate files", "./one-shot-run")
+  .option("--reference <path>", "Alias for the referencePath argument (alternative to positional arg)")
+  .option("--output <path>", "Path to output HTML file (alias for implementation path)")
+  .option("--workdir <dir>", "Working directory for intermediate files", "./one-shot-run")
   .option("--max-passes <n>", "Maximum refinement passes", "5")
   .option("--threshold <ratio>", "Convergence threshold (mismatch ratio)", "0.02")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--json", "Print session log as JSON", false)
   .option("--dry-run", "Print detailed suggested edits for each pass", false)
+  .addHelpText("after", `
+Examples:
+  one-shot-ui run reference.png output.html
+  one-shot-ui run --reference reference.png --output output.html
+  one-shot-ui run --reference reference.png --implementation output.html
+  one-shot-ui run reference.png --impl output.html --max-passes 10
+  one-shot-ui run reference.png http://localhost:3000 --threshold 0.05`)
   .action(async (referencePath, implementationPathArg, options) => {
     ensureChromium();
     const refPath = referencePath ?? options.reference;
     if (!refPath) {
       console.error("Error: reference path is required.");
       console.error("");
-      console.error("Usage: one-shot-ui run <reference.png> <output.html> [--passes 5] [--threshold 0.02]");
-      console.error("   or: one-shot-ui run --reference reference.png --impl output.html");
+      console.error("Usage: one-shot-ui run <reference.png> <output.html>");
+      console.error("   or: one-shot-ui run --reference reference.png --output output.html");
       process.exit(1);
     }
-    const implPath = options.impl ?? options.file ?? implementationPathArg;
+    let implPath = options.output ?? options.impl ?? options.implementation ?? options.file ?? implementationPathArg;
     if (!implPath) {
-      console.error("Error: implementation path is required.");
+      console.error("Error: implementation/output path is required.");
       console.error("");
-      console.error("Usage: one-shot-ui run reference.png output.html [--passes 5] [--threshold 0.02]");
+      console.error("Usage: one-shot-ui run <reference.png> <output.html>");
+      console.error("   or: one-shot-ui run --reference reference.png --output output.html");
       console.error("");
       console.error("Examples:");
       console.error("  one-shot-ui run reference.png output.html");
+      console.error("  one-shot-ui run --reference reference.png --output output.html");
+      console.error("  one-shot-ui run --reference reference.png --implementation output.html");
       console.error("  one-shot-ui run reference.png --impl output.html --max-passes 10");
-      console.error("  one-shot-ui run reference.png http://localhost:3000 --threshold 0.05");
       process.exit(1);
     }
+
+    // Resolve implPath: if it's a directory or lacks a file extension, append index.html
+    if (!implPath.startsWith("http")) {
+      const resolvedImpl = resolve(implPath);
+      let isDir = false;
+      try { isDir = (await stat(resolvedImpl)).isDirectory(); } catch { /* doesn't exist yet */ }
+      if (isDir || implPath.endsWith("/") || !extname(implPath)) {
+        const original = implPath;
+        implPath = join(implPath, "index.html");
+        console.error(`Output path resolved to ${implPath} (was directory: ${original})`);
+      }
+    }
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const outputDir = resolve(options.output, `run-${timestamp}`);
+    const outputDir = resolve(options.workdir, `run-${timestamp}`);
     await mkdir(outputDir, { recursive: true });
 
     const maxPasses = Number.parseInt(options.maxPasses, 10);
@@ -684,26 +641,31 @@ program
       }
     });
 
-    // Auto-scaffold if implementation file doesn't exist
+    // If implementation file doesn't exist, write extract.json and exit
     if (!implPath.startsWith("http") && !existsSync(resolve(implPath))) {
-      console.error(`[Pass 0] Implementation file not found — auto-scaffolding from reference...`);
-      const { generateTailwindReactScaffold } = await import("@one-shot-ui/core/scaffold");
-      const scaffoldResult = generateTailwindReactScaffold(
-        referenceReport.implementationPlan!,
-        referenceReport.semanticAnchors ?? [],
-        referenceReport.tokens ?? [],
-        referenceReport.layout,
-        referenceReport.text,
-        referenceReport.components
-      );
-      const htmlWrapped = wrapTailwindReactAsHtml(scaffoldResult.tsx);
       await mkdir(dirname(resolve(implPath)), { recursive: true });
-      await writeFile(resolve(implPath), htmlWrapped, "utf-8");
-      console.error(`[Pass 0] Scaffold written to ${implPath}`);
+
+      // Write extract data as structured JSON for the builder
+      const extractData = {
+        layout: referenceReport.layout,
+        text: referenceReport.text,
+        colors: referenceReport.colors ?? [],
+        tokens: referenceReport.tokens ?? [],
+        semanticAnchors: referenceReport.semanticAnchors ?? [],
+        components: referenceReport.components ?? [],
+        implementationPlan: referenceReport.implementationPlan ?? null
+      };
+      const extractJsonPath = join(dirname(resolve(implPath)), "extract.json");
+      await writeFile(extractJsonPath, JSON.stringify(extractData, null, 2), "utf-8");
+      console.error(`[Pass 0] Extract data written to ${extractJsonPath}`);
+      console.error(`No implementation found at ${implPath}. Extract data written to ${extractJsonPath}. Create the HTML implementation from extract.json and re-run.`);
+      process.exit(0);
     }
 
     let currentMismatchRatio = 1;
     let passNumber = 0;
+    let sessionBestRatio = Infinity;
+    let sessionBestPass = 0;
 
     while (passNumber < maxPasses && currentMismatchRatio > threshold) {
       passNumber++;
@@ -774,7 +736,17 @@ program
         break;
       }
 
-      currentMismatchRatio = compareReport.summary.mismatchRatio;
+      // Use adjustedMismatch as primary metric (falls back to mismatchRatio)
+      const rawMismatch = compareReport.summary.mismatchRatio;
+      currentMismatchRatio = compareReport.summary.adjustedMismatch ?? rawMismatch;
+      const currentHierarchyScore = compareReport.summary.hierarchyScore ?? 100;
+
+      // Hierarchy score gate: low structural complexity means mismatch is misleadingly low
+      let hierarchyGated = false;
+      if (currentHierarchyScore < 25) {
+        console.error(`  Warning: Implementation has low structural complexity (hierarchy score: ${currentHierarchyScore}/100). Mismatch ratio may be misleadingly low — likely missing content.`);
+        hierarchyGated = true;
+      }
 
       sessionLog.push({
         pass: passNumber,
@@ -782,6 +754,9 @@ program
         timestamp: new Date().toISOString(),
         result: {
           mismatchRatio: currentMismatchRatio,
+          rawMismatch,
+          hierarchyScore: currentHierarchyScore,
+          hierarchyGated,
           issueCount: compareReport.issues.length,
           topIssues: compareReport.issues.slice(0, 5).map(i => ({
             code: i.code,
@@ -798,6 +773,13 @@ program
       // Note: previousRatios includes the current pass since we just pushed it
       const priorRatios = previousRatios.slice(0, -1);
 
+      // Update session best
+      const isSessionRegression = sessionBestPass > 0 && currentMismatchRatio > sessionBestRatio;
+      if (currentMismatchRatio < sessionBestRatio) {
+        sessionBestRatio = currentMismatchRatio;
+        sessionBestPass = passNumber;
+      }
+
       if (priorRatios.length > 0) {
         const prevRatio = priorRatios[priorRatios.length - 1]!;
         if (currentMismatchRatio > prevRatio) {
@@ -807,8 +789,14 @@ program
         }
       }
 
-      // Plateau detection
-      if (previousRatios.length >= 3) {
+      // Session-best regression: stronger warning when current is worse than any prior pass
+      if (isSessionRegression) {
+        console.error(`  ⚠ REGRESSION: ${(currentMismatchRatio * 100).toFixed(2)}% is worse than your session best of ${(sessionBestRatio * 100).toFixed(2)}% (pass ${sessionBestPass})`);
+        console.error(`  Revert recent changes before continuing. Top regressed region: ${compareReport.summary.gridBreakdown?.[0]?.label ?? "unknown"}`);
+      }
+
+      // Plateau detection (skip on regressed passes — don't count regressions toward plateau)
+      if (previousRatios.length >= 3 && !isSessionRegression) {
         const recent = previousRatios.slice(-3);
         const maxRecent = Math.max(...recent);
         const minRecent = Math.min(...recent);
@@ -828,12 +816,61 @@ program
         }
       }
 
-      console.error(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      // Show both adjusted and raw when they differ significantly
+      if (Math.abs(currentMismatchRatio - rawMismatch) > 0.005) {
+        console.error(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}% (raw: ${(rawMismatch * 100).toFixed(2)}%, adjusted for low structural complexity)`);
+      } else {
+        console.error(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
+      }
       console.error(`  Issues: ${compareReport.issues.length}`);
 
-      if (currentMismatchRatio <= threshold) {
+      // Don't count hierarchy-gated passes toward convergence
+      if (!hierarchyGated && currentMismatchRatio <= threshold) {
         console.error(`\nConverged! Mismatch ratio ${(currentMismatchRatio * 100).toFixed(2)}% <= threshold ${(threshold * 100).toFixed(1)}%`);
         break;
+      }
+      if (hierarchyGated && currentMismatchRatio <= threshold) {
+        console.error(`  Mismatch is below threshold but hierarchy score is too low (${currentHierarchyScore}/100) — not converging.`);
+      }
+
+      // Converge when remaining mismatch is within 1.4× irreducible estimate (requires ≥4 passes)
+      const runIrr = compareReport.summary?.segmented?.irreducibleEstimate;
+      if (runIrr != null && runIrr > 0 && currentMismatchRatio < 1.4 * runIrr) {
+        if (passNumber >= 4) {
+          console.error(`\nConverged — mismatch (${(currentMismatchRatio * 100).toFixed(2)}%) is within 1.4× of irreducible floor (${(runIrr * 100).toFixed(1)}%). Remaining differences are font rendering, anti-aliasing, and image content.`);
+          sessionLog.push({
+            pass: passNumber,
+            phase: "quality-gate",
+            timestamp: new Date().toISOString(),
+            result: { action: "irreducible-converge", mismatch: currentMismatchRatio, irreducibleEstimate: runIrr }
+          });
+          break;
+        } else {
+          const topRegion = compareReport.summary.gridBreakdown?.[0]?.label ?? "top mismatch region";
+          console.error(`  Near convergence floor — 1-2 targeted passes recommended, focusing on: ${topRegion}`);
+        }
+      }
+
+      // After first pass, warn if mismatch is very high
+      if (passNumber === 1 && currentMismatchRatio > 0.60) {
+        console.error(`  High initial mismatch (${(currentMismatchRatio * 100).toFixed(1)}%). Builder should use extract.json for layout data.`);
+      }
+
+      // Stall detection — if 3 consecutive passes show < 0.5% improvement and mismatch > 20%, bail
+      if (previousRatios.length >= 3 && currentMismatchRatio > 0.20) {
+        const lastThree = previousRatios.slice(-3);
+        const improvement = lastThree[0]! - lastThree[lastThree.length - 1]!;
+        if (Math.abs(improvement) < 0.005) {
+          console.error(`\nStalled: 3 consecutive passes with < 0.5% improvement at ${(currentMismatchRatio * 100).toFixed(2)}% mismatch.`);
+          console.error(`Use 'one-shot-ui extract <ref>' to get layout data and refine manually.`);
+          sessionLog.push({
+            pass: passNumber,
+            phase: "quality-gate",
+            timestamp: new Date().toISOString(),
+            result: { action: "stall-bail", mismatch: currentMismatchRatio }
+          });
+          break;
+        }
       }
 
       // Region drill-down after first pass
@@ -921,7 +958,7 @@ program
       totalPasses: passNumber,
       finalMismatchRatio: currentMismatchRatio,
       converged: currentMismatchRatio <= threshold,
-      threshold,
+      threshold: threshold,
       convergenceSummary,
       log: sessionLog
     };
@@ -1002,6 +1039,7 @@ program
   .option("--dom-diff <url>", "Enable DOM-level comparison against a live URL or file path")
   .option("--framework <framework>", "Output format: react (Tailwind classes) or vanilla (CSS)", "react")
   .option("--styling <styling>", "Styling approach: tailwind or css", "tailwind")
+  .option("--session-best <ratio>", "Session best mismatch ratio — suppresses forward fixes and advises revert when current is worse")
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       top: Number.parseInt(options.top, 10),
@@ -1031,6 +1069,46 @@ program
       }
     }
 
+    // Session-best regression check: suppress forward fixes and advise revert
+    if (options.sessionBest != null) {
+      const sessionBestVal = Number.parseFloat(options.sessionBest);
+      if (!Number.isNaN(sessionBestVal) && report.summary.mismatchRatio > sessionBestVal) {
+        const topRegion = report.summary.gridBreakdown?.[0]?.label ?? "unknown";
+        const msg = `Revert recent changes before continuing. Session best: ${(sessionBestVal * 100).toFixed(1)}%. Current: ${(report.summary.mismatchRatio * 100).toFixed(1)}%. Top regressed region: ${topRegion}.`;
+        if (options.json) {
+          console.log(JSON.stringify({ version: VERSION, regressed: true, message: msg, fixes: [] }, null, 2));
+        } else {
+          console.log(`⚠ REGRESSION: ${(report.summary.mismatchRatio * 100).toFixed(1)}% is worse than session best of ${(sessionBestVal * 100).toFixed(1)}%.`);
+          console.log(msg);
+        }
+        return;
+      }
+    }
+
+    // Early exit: if mismatch is within 1.4× irreducible estimate, no further fixes recommended
+    if (report.summary.segmented?.irreducibleEstimate != null) {
+      const irr = report.summary.segmented.irreducibleEstimate;
+      if (report.summary.mismatchRatio < 1.4 * irr) {
+        const topRegionHint = report.summary.gridBreakdown?.[0]?.label;
+        const nearMsg = topRegionHint
+          ? ` Near convergence floor — 1-2 targeted passes recommended, focusing on: ${topRegionHint}.`
+          : "";
+        const msg = `Mismatch (${(report.summary.mismatchRatio * 100).toFixed(1)}%) is within 1.4× of irreducible floor (${(irr * 100).toFixed(1)}%). Remaining differences are likely font rendering, anti-aliasing, and image content. No further CSS changes recommended.${nearMsg}`;
+        if (options.json) {
+          console.log(JSON.stringify({ version: VERSION, converged: true, message: msg, fixes: [] }, null, 2));
+        } else {
+          console.log(msg);
+        }
+        return;
+      }
+    }
+
+    // Structural incompleteness warning when hierarchy score is very low
+    const sfHierarchyScore = report.summary.hierarchyScore ?? 100;
+    const structuralWarning = sfHierarchyScore < 30
+      ? "Implementation appears structurally incomplete — add missing sections, text content, and visual hierarchy before fine-tuning spacing/colors."
+      : null;
+
     // Deprioritize content-category (photographic/irreducible) issues in suggestions
     const actionableReport = {
       ...report,
@@ -1057,7 +1135,7 @@ program
 
     // Convert CSS suggestions to Tailwind class suggestions when appropriate
     if (useTailwind) {
-      const { cssToTailwindClass } = await import("@one-shot-ui/core/scaffold");
+      const { cssToTailwindClass } = await import("@one-shot-ui/core/tailwind");
       for (const fix of fixes) {
         if (fix.css) {
           // Parse CSS declarations and convert each to Tailwind
@@ -1101,8 +1179,14 @@ program
     }
 
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...fixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] }, null, 2));
+      const jsonOutput: any = { version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...fixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] };
+      if (structuralWarning) jsonOutput.structuralWarning = structuralWarning;
+      console.log(JSON.stringify(jsonOutput, null, 2));
       return;
+    }
+
+    if (structuralWarning) {
+      console.log(`⚠ ${structuralWarning}\n`);
     }
 
     const filteredCount = allFixes.length - fixes.length;
@@ -1174,11 +1258,11 @@ program
 
     let filePath = options.file ? resolve(options.file) : undefined;
 
-    // If the file is a .tsx/.jsx, wrap it as an HTML file with Tailwind CDN for capture
+    // If the file is a .tsx/.jsx, wrap it as plain HTML with Tailwind CDN for capture
     let tmpHtmlPath: string | undefined;
     if (filePath && (filePath.endsWith(".tsx") || filePath.endsWith(".jsx"))) {
       const tsxContent = await readFile(filePath, "utf8");
-      const htmlWrapped = wrapTailwindReactAsHtml(tsxContent);
+      const htmlWrapped = wrapAsStaticHtml(tsxContent);
       tmpHtmlPath = filePath.replace(/\.tsx$|\.jsx$/, ".capture-tmp.html");
       await writeFile(tmpHtmlPath, htmlWrapped, "utf8");
       filePath = tmpHtmlPath;
@@ -1421,9 +1505,8 @@ function scopeLayout(
 
 /**
  * Infer a CSS selector from an element's bounding box position and size.
- * Used when the implementation is manually-built (no scaffold anchors) to
- * provide actionable selectors based on semantic role inference.
- * This replaces the scaffold-anchor-based mapping with positional heuristics.
+ * Infer a CSS selector from an element's bounding box position and size.
+ * Provides actionable selectors based on semantic role inference.
  */
 function inferSelectorFromBounds(bounds: Bounds): string | null {
   // Use common viewport dimensions as reference (1440x900)
@@ -1518,9 +1601,9 @@ function inferCssCategory(issueCode: string): string | undefined {
 function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; anchorId?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown; issueBounds?: Bounds }> }): ImplementationFix[] {
   const fixes: ImplementationFix[] = [];
 
-  // Detect whether the HTML was scaffold-generated by checking for scaffold-specific
+  // Detect whether the HTML was generated by checking for
   // attributes in the issues. If no issues reference data-anchor or data-node selectors,
-  // the HTML is likely manually built and we should avoid scaffold region anchors.
+  // the HTML is likely manually built and we should avoid region anchors.
   const isScaffoldGenerated = report.issues.some(
     (i) => i.cssSelector?.includes("data-anchor") || i.cssSelector?.includes("data-node")
   );
@@ -1637,11 +1720,11 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
     }
     if (!fix.cssSelector && issue.anchorName) {
       if (isScaffoldGenerated) {
-        // Scaffold-generated: use data-anchor attribute selectors
+        // Use data-anchor attribute selectors when available
         fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
       } else {
         // Manually-built HTML: derive a semantic class name suggestion
-        // without referencing scaffold-specific attributes
+        // without referencing data-anchor attributes
         fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
       }
     }
@@ -1658,7 +1741,7 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
     }
 
     // For manually-built HTML with issueBounds but no selector, use bounding-box
-    // overlap to infer a meaningful semantic selector instead of scaffold region IDs
+    // overlap to infer a meaningful semantic selector
     if (!fix.cssSelector && !isScaffoldGenerated && issue.issueBounds) {
       const b = issue.issueBounds;
       const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
@@ -1971,20 +2054,25 @@ function buildNextActions(compareReport: any, passNumber: number) {
       const ref = issue.reference;
       const impl = issue.implementation;
       if (issue.code === "POSITION_MISMATCH") {
-        if (ref?.y != null && impl?.y != null && Math.abs(impl.y - ref.y) > 4) {
-          const dir = impl.y > ref.y ? "reduce" : "increase";
-          cssProps[`/* ${issue.cssProperty ?? "margin-top"} */`] = `/* ${dir} top by ~${Math.abs(impl.y - ref.y)}px */`;
+        const dY = issue.deltaY ?? (ref?.y != null && impl?.y != null ? impl.y - ref.y : 0);
+        const dX = issue.deltaX ?? (ref?.x != null && impl?.x != null ? impl.x - ref.x : 0);
+        if (Math.abs(dY) > 4) {
+          const dir = dY > 0 ? "reduce" : "increase";
+          cssProps[`/* ${issue.cssProperty ?? "margin-top"} */`] = `/* ${dir} by ~${Math.abs(dY)}px (ref y: ${ref?.y ?? "?"}, impl y: ${impl?.y ?? "?"}) */`;
         }
-        if (ref?.x != null && impl?.x != null && Math.abs(impl.x - ref.x) > 4) {
-          const dir = impl.x > ref.x ? "reduce" : "increase";
-          cssProps[`/* ${issue.cssProperty ?? "margin-left"} */`] = `/* ${dir} left by ~${Math.abs(impl.x - ref.x)}px */`;
+        if (Math.abs(dX) > 4) {
+          const dir = dX > 0 ? "reduce" : "increase";
+          const hProp = dX > 0 ? "margin-left" : "margin-right";
+          cssProps[`/* ${issue.cssProperty ?? hProp} */`] = `/* ${dir} by ~${Math.abs(dX)}px (ref x: ${ref?.x ?? "?"}, impl x: ${impl?.x ?? "?"}) */`;
         }
       } else if (issue.code === "SIZE_MISMATCH") {
-        if (ref?.width != null && impl?.width != null && Math.abs(impl.width - ref.width) > 4) {
-          cssProps["/* width */"] = `/* set to ${ref.width}px (currently ${impl.width}px) */`;
+        const dW = issue.deltaWidth ?? (ref?.width != null && impl?.width != null ? impl.width - ref.width : 0);
+        const dH = issue.deltaHeight ?? (ref?.height != null && impl?.height != null ? impl.height - ref.height : 0);
+        if (Math.abs(dW) > 4) {
+          cssProps["/* width */"] = `/* set to ${ref?.width ?? "?"}px (currently ${impl?.width ?? "?"}px, ${dW > 0 ? "too wide" : "too narrow"} by ~${Math.abs(dW)}px) */`;
         }
-        if (ref?.height != null && impl?.height != null && Math.abs(impl.height - ref.height) > 4) {
-          cssProps["/* height */"] = `/* set to ${ref.height}px (currently ${impl.height}px) */`;
+        if (Math.abs(dH) > 4) {
+          cssProps["/* height */"] = `/* set to ${ref?.height ?? "?"}px (currently ${impl?.height ?? "?"}px, ${dH > 0 ? "too tall" : "too short"} by ~${Math.abs(dH)}px) */`;
         }
       } else if (issue.code === "SPACING_MISMATCH") {
         if (ref?.distance != null && impl?.distance != null) {
@@ -2246,15 +2334,244 @@ function buildConvergenceSummary(log: SessionEntry[], threshold: number) {
 }
 
 /**
- * Wrap a React + Tailwind TSX component as a self-contained HTML file
- * that can be opened directly in a browser or captured by Puppeteer.
- * Uses Tailwind CDN, React CDN, and Babel standalone for in-browser JSX transform.
+ * Scan HTML for Tailwind utility classes and emit equivalent inline CSS rules
+ * so the page renders correctly even when the Tailwind CDN fails to load.
  */
-function wrapTailwindReactAsHtml(tsx: string): string {
-  // Strip the import line and export default, extract component body
-  const stripped = tsx
+function generateInlineStyles(html: string): string {
+  // Collect all class="..." values
+  const classAttrRe = /class="([^"]*)"/g;
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = classAttrRe.exec(html)) !== null) {
+    for (const cls of m[1].split(/\s+/).filter(Boolean)) {
+      seen.add(cls);
+    }
+  }
+  if (seen.size === 0) return "";
+
+  // Tailwind spacing scale (rem)
+  const spacingScale: Record<string, string> = {
+    "0": "0px", "0.5": "0.125rem", "1": "0.25rem", "1.5": "0.375rem",
+    "2": "0.5rem", "2.5": "0.625rem", "3": "0.75rem", "3.5": "0.875rem",
+    "4": "1rem", "5": "1.25rem", "6": "1.5rem", "7": "1.75rem",
+    "8": "2rem", "9": "2.25rem", "10": "2.5rem", "11": "2.75rem",
+    "12": "3rem", "14": "3.5rem", "16": "4rem", "20": "5rem",
+    "24": "6rem", "32": "8rem", "40": "10rem", "48": "12rem",
+    "56": "14rem", "64": "16rem",
+  };
+
+  const rules: string[] = [];
+
+  const escapeCls = (c: string) => c.replace(/([[\]#%().\/,])/g, "\\$1");
+
+  for (const cls of seen) {
+    let decl: string | null = null;
+
+    // Layout
+    if (cls === "w-full") decl = "width:100%";
+    else if (cls === "h-full") decl = "height:100%";
+    else if (cls === "min-h-screen") decl = "min-height:100vh";
+    else if (cls === "max-w-full") decl = "max-width:100%";
+    // Arbitrary values: w-[N%], w-[Npx], min-h-[Npx], h-[Npx], max-w-[Npx]
+    else if (/^w-\[.+\]$/.test(cls)) decl = `width:${cls.slice(3, -1)}`;
+    else if (/^h-\[.+\]$/.test(cls)) decl = `height:${cls.slice(3, -1)}`;
+    else if (/^min-h-\[.+\]$/.test(cls)) decl = `min-height:${cls.slice(7, -1)}`;
+    else if (/^max-w-\[.+\]$/.test(cls)) decl = `max-width:${cls.slice(7, -1)}`;
+
+    // Flex
+    else if (cls === "flex") decl = "display:flex";
+    else if (cls === "inline-flex") decl = "display:inline-flex";
+    else if (cls === "flex-col") decl = "flex-direction:column";
+    else if (cls === "flex-row") decl = "flex-direction:row";
+    else if (cls === "flex-wrap") decl = "flex-wrap:wrap";
+    else if (cls === "flex-nowrap") decl = "flex-wrap:nowrap";
+    else if (cls === "flex-1") decl = "flex:1 1 0%";
+    else if (cls === "flex-none") decl = "flex:none";
+    else if (cls === "items-center") decl = "align-items:center";
+    else if (cls === "items-start") decl = "align-items:flex-start";
+    else if (cls === "items-end") decl = "align-items:flex-end";
+    else if (cls === "items-stretch") decl = "align-items:stretch";
+    else if (cls === "justify-center") decl = "justify-content:center";
+    else if (cls === "justify-between") decl = "justify-content:space-between";
+    else if (cls === "justify-start") decl = "justify-content:flex-start";
+    else if (cls === "justify-end") decl = "justify-content:flex-end";
+    else if (cls === "justify-around") decl = "justify-content:space-around";
+
+    // Grid
+    else if (cls === "grid") decl = "display:grid";
+    else if (/^grid-cols-(\d+)$/.test(cls)) {
+      const n = cls.match(/^grid-cols-(\d+)$/)![1];
+      decl = `grid-template-columns:repeat(${n},minmax(0,1fr))`;
+    }
+
+    // Gap
+    else if (/^gap-\[.+\]$/.test(cls)) decl = `gap:${cls.slice(5, -1)}`;
+    else if (/^gap-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^gap-(.+)$/)![1];
+      decl = spacingScale[val] ? `gap:${spacingScale[val]}` : null;
+    }
+
+    // Box
+    else if (cls === "box-border") decl = "box-sizing:border-box";
+    else if (cls === "overflow-hidden") decl = "overflow:hidden";
+    else if (cls === "overflow-auto") decl = "overflow:auto";
+    else if (cls === "relative") decl = "position:relative";
+    else if (cls === "absolute") decl = "position:absolute";
+    else if (cls === "hidden") decl = "display:none";
+    else if (cls === "block") decl = "display:block";
+    else if (cls === "inline-block") decl = "display:inline-block";
+
+    // Background: bg-[#hex]
+    else if (/^bg-\[#[0-9a-fA-F]+\]$/.test(cls)) decl = `background-color:${cls.slice(4, -1)}`;
+    else if (/^bg-\[rgb/.test(cls)) decl = `background-color:${cls.slice(4, -1)}`;
+    else if (cls === "bg-white") decl = "background-color:#ffffff";
+    else if (cls === "bg-black") decl = "background-color:#000000";
+    else if (cls === "bg-transparent") decl = "background-color:transparent";
+
+    // Text color
+    else if (/^text-\[#[0-9a-fA-F]+\]$/.test(cls)) decl = `color:${cls.slice(6, -1)}`;
+    else if (cls === "text-white") decl = "color:#ffffff";
+    else if (cls === "text-black") decl = "color:#000000";
+
+    // Text size (arbitrary)
+    else if (/^text-\[\d/.test(cls)) decl = `font-size:${cls.slice(6, -1)}`;
+    // Text size (named)
+    else if (cls === "text-xs") decl = "font-size:0.75rem;line-height:1rem";
+    else if (cls === "text-sm") decl = "font-size:0.875rem;line-height:1.25rem";
+    else if (cls === "text-base") decl = "font-size:1rem;line-height:1.5rem";
+    else if (cls === "text-lg") decl = "font-size:1.125rem;line-height:1.75rem";
+    else if (cls === "text-xl") decl = "font-size:1.25rem;line-height:1.75rem";
+    else if (cls === "text-2xl") decl = "font-size:1.5rem;line-height:2rem";
+    else if (cls === "text-3xl") decl = "font-size:1.875rem;line-height:2.25rem";
+    else if (cls === "text-4xl") decl = "font-size:2.25rem;line-height:2.5rem";
+
+    // Font weight
+    else if (cls === "font-bold") decl = "font-weight:700";
+    else if (cls === "font-semibold") decl = "font-weight:600";
+    else if (cls === "font-medium") decl = "font-weight:500";
+    else if (cls === "font-normal") decl = "font-weight:400";
+    else if (cls === "font-light") decl = "font-weight:300";
+
+    // Text align
+    else if (cls === "text-center") decl = "text-align:center";
+    else if (cls === "text-left") decl = "text-align:left";
+    else if (cls === "text-right") decl = "text-align:right";
+
+    // Padding: p-N, px-N, py-N, pt/pr/pb/pl-N, arbitrary p-[Npx]
+    else if (/^p-\[.+\]$/.test(cls)) decl = `padding:${cls.slice(3, -1)}`;
+    else if (/^p-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^p-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding:${spacingScale[val]}` : null;
+    }
+    else if (/^px-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^px-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-left:${spacingScale[val]};padding-right:${spacingScale[val]}` : null;
+    }
+    else if (/^py-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^py-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-top:${spacingScale[val]};padding-bottom:${spacingScale[val]}` : null;
+    }
+    else if (/^pt-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^pt-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-top:${spacingScale[val]}` : null;
+    }
+    else if (/^pb-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^pb-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-bottom:${spacingScale[val]}` : null;
+    }
+    else if (/^pl-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^pl-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-left:${spacingScale[val]}` : null;
+    }
+    else if (/^pr-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^pr-(.+)$/)![1];
+      decl = spacingScale[val] ? `padding-right:${spacingScale[val]}` : null;
+    }
+    // Arbitrary padding
+    else if (/^px-\[.+\]$/.test(cls)) decl = `padding-left:${cls.slice(4, -1)};padding-right:${cls.slice(4, -1)}`;
+    else if (/^py-\[.+\]$/.test(cls)) decl = `padding-top:${cls.slice(4, -1)};padding-bottom:${cls.slice(4, -1)}`;
+
+    // Margin: m-N, mx-N, my-N, mx-auto
+    else if (cls === "mx-auto") decl = "margin-left:auto;margin-right:auto";
+    else if (/^m-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^m-(.+)$/)![1];
+      decl = spacingScale[val] ? `margin:${spacingScale[val]}` : null;
+    }
+    else if (/^mx-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^mx-(.+)$/)![1];
+      decl = spacingScale[val] ? `margin-left:${spacingScale[val]};margin-right:${spacingScale[val]}` : null;
+    }
+    else if (/^my-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^my-(.+)$/)![1];
+      decl = spacingScale[val] ? `margin-top:${spacingScale[val]};margin-bottom:${spacingScale[val]}` : null;
+    }
+    else if (/^mt-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^mt-(.+)$/)![1];
+      decl = spacingScale[val] ? `margin-top:${spacingScale[val]}` : null;
+    }
+    else if (/^mb-(\d+(?:\.\d+)?)$/.test(cls)) {
+      const val = cls.match(/^mb-(.+)$/)![1];
+      decl = spacingScale[val] ? `margin-bottom:${spacingScale[val]}` : null;
+    }
+
+    // Rounded
+    else if (cls === "rounded") decl = "border-radius:0.25rem";
+    else if (cls === "rounded-lg") decl = "border-radius:0.5rem";
+    else if (cls === "rounded-xl") decl = "border-radius:0.75rem";
+    else if (cls === "rounded-2xl") decl = "border-radius:1rem";
+    else if (cls === "rounded-full") decl = "border-radius:9999px";
+    else if (/^rounded-\[.+\]$/.test(cls)) decl = `border-radius:${cls.slice(9, -1)}`;
+
+    // Border
+    else if (cls === "border") decl = "border-width:1px";
+    else if (/^border-\[#[0-9a-fA-F]+\]$/.test(cls)) decl = `border-color:${cls.slice(8, -1)}`;
+
+    // Shadow
+    else if (cls === "shadow") decl = "box-shadow:0 1px 3px 0 rgba(0,0,0,0.1),0 1px 2px -1px rgba(0,0,0,0.1)";
+    else if (cls === "shadow-lg") decl = "box-shadow:0 10px 15px -3px rgba(0,0,0,0.1),0 4px 6px -4px rgba(0,0,0,0.1)";
+
+    // Inset positioning
+    else if (cls === "inset-0") decl = "top:0;right:0;bottom:0;left:0";
+    else if (/^top-\[.+\]$/.test(cls)) decl = `top:${cls.slice(5, -1)}`;
+    else if (/^left-\[.+\]$/.test(cls)) decl = `left:${cls.slice(6, -1)}`;
+    else if (/^right-\[.+\]$/.test(cls)) decl = `right:${cls.slice(7, -1)}`;
+    else if (/^bottom-\[.+\]$/.test(cls)) decl = `bottom:${cls.slice(8, -1)}`;
+
+    if (decl) {
+      rules.push(`.${escapeCls(cls)}{${decl}}`);
+    }
+  }
+
+  if (rules.length === 0) return "";
+  return `<style>/* Tailwind fallback — renders without CDN */\n${rules.join("\n")}\n</style>`;
+}
+
+/**
+ * Convert Tailwind+React TSX to plain HTML that renders
+ * without React, Babel, or any runtime transpilation.
+ * Keeps Tailwind CDN for utility classes but emits plain HTML (not JSX).
+ * Includes inline CSS fallback so styling works even when CDN is unavailable.
+ */
+function wrapAsStaticHtml(tsx: string): string {
+  // Extract the JSX body from the component function
+  let body = tsx
+    // Remove React import
     .replace(/^import\s+React\s+from\s+["']react["'];?\s*\n?/m, "")
-    .replace(/^export\s+default\s+/m, "const PageComponent = ");
+    // Remove component wrapper: "export default function Page() {\n  return (\n"
+    .replace(/^export\s+default\s+function\s+\w+\(\)\s*\{\s*\n\s*return\s*\(\s*\n?/m, "")
+    // Remove closing ");\n}" at the end
+    .replace(/\s*\);\s*\}\s*$/, "");
+
+  // Convert JSX to HTML:
+  // 1. className → class
+  body = body.replace(/\bclassName=/g, "class=");
+  // 2. Self-closing tags like <div class="..." /> → <div class="..."></div>
+  body = body.replace(/<(\w+)(\s[^>]*?)\s*\/>/g, "<$1$2></$1>");
+  // 3. JSX escaped braces &#123; &#125; back to { }
+  body = body.replace(/&#123;/g, "{").replace(/&#125;/g, "}");
+
+  // Generate inline CSS fallback from Tailwind classes used in the body
+  const inlineStyles = generateInlineStyles(body);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2262,19 +2579,18 @@ function wrapTailwindReactAsHtml(tsx: string): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>UI Scaffold</title>
+  ${inlineStyles}
   <script src="https://cdn.tailwindcss.com"><\/script>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin><\/script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin><\/script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="text/babel">
-${stripped}
-
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(React.createElement(PageComponent));
-  <\/script>
+${body}
 </body>
 </html>`;
+}
+
+/**
+ * @deprecated Use wrapAsStaticHtml instead. Kept for backward compatibility with .tsx/.jsx capture.
+ */
+function wrapTailwindReactAsHtml(tsx: string): string {
+  return wrapAsStaticHtml(tsx);
 }

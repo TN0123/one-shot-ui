@@ -1,7 +1,7 @@
 # one-shot-ui
 
-Deterministic UI extraction and comparison toolkit. Use this tool to go from a
-reference screenshot to a pixel-accurate implementation.
+Deterministic UI extraction and comparison toolkit. Use this tool to see what is
+wrong with a UI implementation compared to a reference screenshot.
 
 ## Installation
 
@@ -13,9 +13,8 @@ reference screenshot to a pixel-accurate implementation.
 1. **Extract** — Analyze a reference screenshot into structured layout data:
        one-shot-ui extract reference.png --json
 
-2. **Scaffold** — Generate React + Tailwind component (default) or HTML/CSS:
-       one-shot-ui scaffold reference.png --output ./src
-       one-shot-ui scaffold reference.png --output ./src --framework vanilla --styling css
+2. **Build** — Use the extracted data (colors, spacing, typography, tokens) to
+   build your implementation. The agent should write the UI code directly.
 
 3. **Capture** — Screenshot your implementation:
        one-shot-ui capture --url http://localhost:3000 --output impl.png
@@ -35,7 +34,6 @@ reference screenshot to a pixel-accurate implementation.
 |-----------------|--------------------------------------------|----------------------------------  |
 | extract         | Analyze screenshot into layout/color/text  | --json, --no-ocr, --overlay, --fine|
 | compare         | Pixel + structural diff                    | --json, --heatmap, --dom-diff      |
-| scaffold        | Generate React+Tailwind or HTML/CSS         | --framework, --styling, --output   |
 | tokens          | Extract design tokens                      | --json                             |
 | plan            | Generate implementation strategy           | --json                             |
 | capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output            |
@@ -58,3 +56,5 @@ with Zod schemas and follow stable interfaces.
 - `suggest-fixes --dom-diff <url>` gives the most accurate CSS fixes by
   comparing against the live DOM rather than just pixels.
 - Design tokens from `tokens` can be fed directly into CSS variable definitions.
+- Build the UI yourself using the extracted data — one-shot-ui is for analysis
+  and comparison, not code generation.

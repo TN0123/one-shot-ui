@@ -256,8 +256,9 @@ export const compareIssueSchema = z.object({
     "TEXT_COUNT_MISMATCH",
     "DOM_POSITION_MISMATCH",
     "DOM_SIZE_MISMATCH",
-    "DOM_STYLE_MISMATCH"
-  ]),
+    "DOM_STYLE_MISMATCH",
+    "LOW_STRUCTURAL_COMPLEXITY"
+  ]).or(z.string()),
   nodeId: z.string().optional(),
   anchorId: z.string().optional(),
   anchorName: z.string().optional(),
@@ -290,6 +291,15 @@ export const compareReportSchema = z.object({
   summary: z.object({
     mismatchPixels: z.number().int().nonnegative(),
     mismatchRatio: z.number().min(0).max(1),
+    rawMismatch: z.number().min(0).max(1).optional(),
+    adjustedMismatch: z.number().min(0).max(1).optional(),
+    structuralComplexity: z.object({
+      referenceEdgeDensity: z.number().min(0),
+      implementationEdgeDensity: z.number().min(0),
+      edgeDensityRatio: z.number().min(0),
+      penaltyApplied: z.boolean(),
+      penaltyMultiplier: z.number().min(1),
+    }).optional(),
     matchedLayoutNodes: z.number().int().nonnegative(),
     widthDelta: z.number().int(),
     heightDelta: z.number().int(),
@@ -307,6 +317,12 @@ export const compareReportSchema = z.object({
       contentRegionCount: z.number().int().nonnegative(),
       irreducibleEstimate: z.number().min(0).max(1).optional(),
     }).optional(),
+    hierarchyScore: z.number().min(0).max(100).optional(),
+    gridBreakdown: z.array(z.object({
+      label: z.string(),
+      mismatchRatio: z.number().min(0).max(1),
+      contribution: z.number().min(0).max(1)
+    })).optional(),
   }),
   issues: z.array(compareIssueSchema),
   groupedIssues: z.array(z.object({
