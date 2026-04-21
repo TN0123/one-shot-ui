@@ -9,9 +9,15 @@ import sharp from "sharp";
  * - Increases contrast
  * - Upscales small images (height < 300px) by 2x for better glyph recognition
  *
- * Returns the path to the preprocessed temp file.
+ * Returns the path to the preprocessed temp file and the scale factor applied
+ * (callers must divide OCR bbox coords by this factor to map back to original image).
  */
-export async function preprocessForOcr(imagePath: string): Promise<string> {
+export interface PreprocessResult {
+  outputPath: string;
+  scale: number;
+}
+
+export async function preprocessForOcr(imagePath: string): Promise<PreprocessResult> {
   const image = sharp(imagePath);
   const metadata = await image.metadata();
   const width = metadata.width ?? 0;
@@ -37,7 +43,9 @@ export async function preprocessForOcr(imagePath: string): Promise<string> {
   pipeline = pipeline.linear(1.5, -(128 * 1.5 - 128));
 
   // Upscale small images
+  let scale = 1;
   if (height < 300) {
+    scale = 2;
     pipeline = pipeline.resize({
       width: width * 2,
       height: height * 2,
@@ -47,7 +55,7 @@ export async function preprocessForOcr(imagePath: string): Promise<string> {
 
   const outputPath = imagePath.replace(/(\.\w+)$/, "-ocr-preprocessed$1");
   await pipeline.toFile(outputPath);
-  return outputPath;
+  return { outputPath, scale };
 }
 
 function detectDarkBackground(

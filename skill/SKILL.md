@@ -51,6 +51,26 @@ For hands-off refinement, use:
 This runs the extract→capture→compare→fix loop automatically, writing artifacts
 for each pass.
 
+### Watch-Mode Server (recommended for iterative work)
+
+Start a local DOM-aware server that watches your HTML file:
+`one-shot-ui serve --ref <reference.png> --impl ./index.html --port 7777`
+
+Query endpoints over HTTP while you edit:
+
+- `GET /reference` — the reference brief (colors, text with bounds, regions).
+- `GET /element?selector=<css>` — pass any CSS selector for an element in YOUR
+  HTML; returns `myComputed` (real rendered styles), `reference` (the matched
+  reference region at the same bounds), and `diffs[]` (concrete CSS suggestions
+  that reference YOUR selector, not fabricated names).
+- `POST /apply-temp` `{"selector": "...", "css": "..."}` — trials a candidate
+  CSS change, scores before/after, returns signed `globalDelta`/`scopedDelta`
+  and a `verdict`. Use this to pick winning fixes before writing them to disk.
+- `GET /status` — current overall mismatchRatio + top-mismatched regions.
+
+Save your HTML file; the server auto-reloads the page in ~120ms. Every edit
+yields a measurable mismatch delta — this is the fastest path to convergence.
+
 ## Output Parsing
 
 All commands support `--json`. Always use it. Key schemas:

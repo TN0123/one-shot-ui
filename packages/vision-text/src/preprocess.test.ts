@@ -30,11 +30,12 @@ describe("preprocessForOcr", () => {
     filesToClean.push(inputPath, expectedOutput);
 
     const result = await preprocessForOcr(inputPath);
-    expect(result).toBe(expectedOutput);
-    expect(existsSync(result)).toBe(true);
+    expect(result.outputPath).toBe(expectedOutput);
+    expect(result.scale).toBe(1);
+    expect(existsSync(result.outputPath)).toBe(true);
 
     // Verify the output was inverted: dark input corners should now be light
-    const outputMeta = await sharp(result).raw().toBuffer({ resolveWithObject: true });
+    const outputMeta = await sharp(result.outputPath).raw().toBuffer({ resolveWithObject: true });
     // After grayscale + negate + contrast, the originally dark pixels should be bright
     const firstPixel = outputMeta.data[0] ?? 0;
     expect(firstPixel).toBeGreaterThan(128);
@@ -55,7 +56,8 @@ describe("preprocessForOcr", () => {
     filesToClean.push(inputPath, expectedOutput);
 
     const result = await preprocessForOcr(inputPath);
-    const meta = await sharp(result).metadata();
+    expect(result.scale).toBe(2);
+    const meta = await sharp(result.outputPath).metadata();
     expect(meta.width).toBe(200);
     expect(meta.height).toBe(160);
   });
@@ -75,7 +77,8 @@ describe("preprocessForOcr", () => {
     filesToClean.push(inputPath, expectedOutput);
 
     const result = await preprocessForOcr(inputPath);
-    const meta = await sharp(result).metadata();
+    expect(result.scale).toBe(1);
+    const meta = await sharp(result.outputPath).metadata();
     expect(meta.width).toBe(800);
     expect(meta.height).toBe(600);
   });

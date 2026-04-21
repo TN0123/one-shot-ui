@@ -120,6 +120,7 @@ export async function compareImages(
   );
 
   const gridBreakdown = computeGridRegionBreakdown(diff.data, width, height);
+  const verticalShift = computeVerticalShift(diff.data, width, height);
 
   const issues: CompareIssue[] = [];
   if (referenceImage.width !== implementationImage.width || referenceImage.height !== implementationImage.height) {
@@ -449,6 +450,7 @@ export async function compareImages(
       },
       hierarchyScore,
       gridBreakdown: gridBreakdown.length > 0 ? gridBreakdown : undefined,
+      verticalShift: verticalShift.confidence > 0 ? verticalShift : undefined,
     },
     issues: filteredIssues,
     groupedIssues,
@@ -459,6 +461,66 @@ export async function compareImages(
       regionHeatmaps: regionHeatmaps.length > 0 ? regionHeatmaps : undefined
     }
   });
+}
+
+/**
+ * Detect global vertical displacement by projecting the diff onto the Y axis.
+ * Returns the estimated pixel offset and a confidence score (0–1) indicating how
+ * "banded" (i.e. shift-like) the mismatch is versus uniformly spread.
+ * Positive pixelOffset means content appears shifted downward in the implementation.
+ */
+function computeVerticalShift(
+  diffData: { readonly [index: number]: number },
+  width: number,
+  height: number
+): { pixelOffset: number; confidence: number } {
+  if (width === 0 || height === 0) return { pixelOffset: 0, confidence: 0 };
+
+  // Project mismatch pixel counts onto the Y axis
+  const rowCounts = new Array<number>(height).fill(0);
+  let totalMismatch = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const r = diffData[idx] ?? 0;
+      const g = diffData[idx + 1] ?? 0;
+      const isMismatch = (r > 200 && g < 100) || (r < 100 && g > 120);
+      if (isMismatch) {
+        rowCounts[y]!++;
+        totalMismatch++;
+      }
+    }
+  }
+
+  if (totalMismatch === 0) return { pixelOffset: 0, confidence: 0 };
+
+  // Find highest-density band using a sliding window of 20 rows
+  const windowSize = Math.min(20, height);
+  let bestBandStart = 0;
+  let bestBandCount = 0;
+
+  // Compute initial window sum
+  let windowSum = 0;
+  for (let i = 0; i < windowSize; i++) windowSum += rowCounts[i]!;
+  bestBandCount = windowSum;
+
+  for (let start = 1; start <= height - windowSize; start++) {
+    windowSum -= rowCounts[start - 1]!;
+    windowSum += rowCounts[start + windowSize - 1]!;
+    if (windowSum > bestBandCount) {
+      bestBandCount = windowSum;
+      bestBandStart = start;
+    }
+  }
+
+  // Median Y of the top band
+  const bandMidY = bestBandStart + Math.floor(windowSize / 2);
+  const pixelOffset = bandMidY - Math.floor(height / 2);
+
+  // Confidence: fraction of all mismatch pixels that fall within the top band
+  const confidence = totalMismatch > 0 ? bestBandCount / totalMismatch : 0;
+
+  return { pixelOffset, confidence };
 }
 
 /**

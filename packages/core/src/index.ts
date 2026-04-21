@@ -368,6 +368,12 @@ export const compareReportSchema = z.object({
         }),
       )
       .optional(),
+    verticalShift: z
+      .object({
+        pixelOffset: z.number(),
+        confidence: z.number().min(0).max(1),
+      })
+      .optional(),
   }),
   issues: z.array(compareIssueSchema),
   groupedIssues: z
@@ -608,13 +614,16 @@ export function buildSemanticAnchors(
   const panelAnchors = new Map<string, SemanticAnchor>();
   const usedNames = new Set<string>();
 
-  // Use detected large panels when coverage is sufficient, otherwise supplement
-  // with a minimal synthetic shell (header + body) instead of assuming a specific layout
+  // Use detected large panels only when we found at least two (enough to imply
+  // real structure). Otherwise supplement with a minimal synthetic shell so
+  // downstream labels/anchors always exist — empty anchors break the whole chain.
   const panelSeed: Array<LayoutNode | { bounds: Bounds }> =
-    largePanels.length >= 2 || contentCoverage > 0.35
+    largePanels.length >= 2
       ? largePanels
       : [...largePanels, ...buildSyntheticShell(pageWidth, pageHeight)];
+  void contentCoverage;
 
+  const panelAnchorList: Array<{ anchor: SemanticAnchor; bounds: Bounds }> = [];
   panelSeed.forEach((node) => {
     const { name, role } = classifyPanel(
       node.bounds,
@@ -635,27 +644,37 @@ export function buildSemanticAnchors(
     if (isLayoutNode(node)) {
       panelAnchors.set(node.id, anchor);
     }
+    panelAnchorList.push({ anchor, bounds: node.bounds });
   });
 
-  const nodesByParent = new Map<string, LayoutNode[]>();
+  // Assign each layout node to the smallest panel (detected or synthetic) that
+  // contains it. Previously this used only largePanels, so synthetic-shell
+  // anchors had no children and the whole label cascade stayed empty.
+  const nodesByParentAnchor = new Map<string, LayoutNode[]>();
   for (const node of nodes) {
-    const parent = findBestParentPanel(node, largePanels);
-    if (!parent) {
-      continue;
+    let best: { anchor: SemanticAnchor; area: number } | null = null;
+    for (const { anchor, bounds } of panelAnchorList) {
+      if (anchor.nodeId === node.id) continue;
+      if (!contains(bounds, node.bounds)) continue;
+      const area = bounds.width * bounds.height;
+      if (!best || area < best.area) {
+        best = { anchor, area };
+      }
     }
-    if (!nodesByParent.has(parent.id)) {
-      nodesByParent.set(parent.id, []);
+    if (!best) continue;
+    if (!nodesByParentAnchor.has(best.anchor.id)) {
+      nodesByParentAnchor.set(best.anchor.id, []);
     }
-    nodesByParent.get(parent.id)!.push(node);
+    nodesByParentAnchor.get(best.anchor.id)!.push(node);
   }
 
-  for (const [parentId, members] of nodesByParent) {
-    const parentAnchor = panelAnchors.get(parentId);
+  for (const [parentAnchorId, members] of nodesByParentAnchor) {
+    const parentAnchor = anchors.find((a) => a.id === parentAnchorId);
     if (!parentAnchor) {
       continue;
     }
     const siblings = members
-      .filter((node) => node.id !== parentId)
+      .filter((node) => node.id !== parentAnchor.nodeId)
       .sort(
         (left, right) =>
           left.bounds.y - right.bounds.y || left.bounds.x - right.bounds.x,

@@ -320,6 +320,14 @@ Examples:
         const top = report.summary.gridBreakdown[0]!;
         summaryLine += ` | TOP_REGION: ${top.label} (${(top.mismatchRatio * 100).toFixed(1)}% mismatch, ${(top.contribution * 100).toFixed(0)}% of total)`;
       }
+      // Vertical shift warning in summary
+      {
+        const vs = (report.summary as any).verticalShift as { pixelOffset: number; confidence: number } | undefined;
+        if (vs && Math.abs(vs.pixelOffset) > 20 && vs.confidence > 0.5) {
+          const direction = vs.pixelOffset > 0 ? "downward" : "upward";
+          summaryLine += ` | VERTICAL_SHIFT: ~${Math.abs(vs.pixelOffset)}px ${direction} — check container heights above the fold`;
+        }
+      }
       if (regressionInfo.sessionBestWarning) {
         summaryLine += ` | ${regressionInfo.sessionBestWarning}`;
       } else if (regressionInfo.regressionWarning) {
@@ -392,14 +400,18 @@ Examples:
         console.log(`Warning: Low visual hierarchy score (${cmpHierarchy}/100) — implementation may be missing structural content.`);
       }
     }
+    // Load semantic label map to replace opaque region-N IDs in output
+    const compareLabelMap = await loadSemanticLabelMap(resolvedImplPath, finalRefPath);
     console.log(`Issues: ${report.issues.length}`);
     for (const issue of report.issues.slice(0, Math.min(8, report.issues.length))) {
-      const prefix = issue.anchorName ? `${issue.anchorName}: ` : "";
+      const resolvedAnchor = issue.anchorName ? applySemanticLabels(issue.anchorName, compareLabelMap) : undefined;
+      const prefix = resolvedAnchor ? `${resolvedAnchor}: ` : "";
       const categoryTag = issue.category ? ` [${issue.category}]` : "";
       const actionableTag = issue.actionable === false ? " (non-actionable)" : "";
-      console.log(`- [${issue.severity}]${categoryTag} ${prefix}${issue.message}${actionableTag}`);
+      const resolvedMsg = applySemanticLabels(issue.message, compareLabelMap);
+      console.log(`- [${issue.severity}]${categoryTag} ${prefix}${resolvedMsg}${actionableTag}`);
       if (issue.suggestedFix && issue.actionable !== false) {
-        console.log(`  fix: ${issue.suggestedFix}`);
+        console.log(`  fix: ${applySemanticLabels(issue.suggestedFix, compareLabelMap)}`);
       }
     }
     if (report.topEditCandidates?.length) {
@@ -439,6 +451,15 @@ Examples:
       }
     }
 
+    // Surface vertical displacement warning when offset is significant and confident
+    {
+      const vs = (report.summary as any).verticalShift as { pixelOffset: number; confidence: number } | undefined;
+      if (vs && Math.abs(vs.pixelOffset) > 20 && vs.confidence > 0.5) {
+        const direction = vs.pixelOffset > 0 ? "downward" : "upward";
+        console.log(`\n⚠ Content appears shifted ~${Math.abs(vs.pixelOffset)}px ${direction} — check heights of containers above the fold.`);
+      }
+    }
+
     if (report.artifacts.heatmapPath) {
       console.log(`Heatmap: ${report.artifacts.heatmapPath}`);
     }
@@ -463,13 +484,15 @@ Examples:
         console.log(`\n── Top ${topFixesCount} Actionable Fixes ──`);
         for (const candidate of report.topEditCandidates.slice(0, topFixesCount)) {
           const selector = candidate.cssSelector ? ` on ${candidate.cssSelector}` : "";
-          const anchor = candidate.anchorName ? ` (${candidate.anchorName})` : "";
+          const resolvedCandidateAnchor = candidate.anchorName ? applySemanticLabels(candidate.anchorName, compareLabelMap) : undefined;
+          const anchor = resolvedCandidateAnchor ? ` (${resolvedCandidateAnchor})` : "";
           const riskWarning = (candidate as any).risk === "high"
             ? ` [CAUTION — affects ${(candidate as any).affectedAreaPercent ?? "?"}% of page]`
             : "";
-          console.log(`${candidate.rank}. ${candidate.cssChanges[0] ?? candidate.description}${selector}${anchor}${riskWarning}`);
+          const resolvedDesc = applySemanticLabels(candidate.cssChanges[0] ?? candidate.description, compareLabelMap);
+          console.log(`${candidate.rank}. ${resolvedDesc}${selector}${anchor}${riskWarning}`);
           for (const css of candidate.cssChanges.slice(1)) {
-            console.log(`   ${css}`);
+            console.log(`   ${applySemanticLabels(css, compareLabelMap)}`);
           }
         }
       }
@@ -666,6 +689,7 @@ Examples:
     let passNumber = 0;
     let sessionBestRatio = Infinity;
     let sessionBestPass = 0;
+    let runExitReason: string | undefined;
 
     while (passNumber < maxPasses && currentMismatchRatio > threshold) {
       passNumber++;
@@ -803,6 +827,17 @@ Examples:
         if ((maxRecent - minRecent) < 0.005) {
           console.error(`  PLATEAU_REACHED: Last ${recent.length} passes within ${((maxRecent - minRecent) * 100).toFixed(2)}pp of each other.`);
           console.error(`  Remaining mismatch may be irreducible (font rendering, photographic content). Consider stopping.`);
+          if (passNumber >= 3) {
+            console.error(`\nExiting: mismatch unchanged for 2 consecutive passes (${(currentMismatchRatio * 100).toFixed(1)}%). No further passes will improve this score. Run 'suggest-fixes' to diagnose the plateau.`);
+            sessionLog.push({
+              pass: passNumber,
+              phase: "quality-gate",
+              timestamp: new Date().toISOString(),
+              result: { action: "plateau-exit", mismatch: currentMismatchRatio }
+            });
+            runExitReason = "stall";
+            break;
+          }
         }
       }
 
@@ -823,6 +858,14 @@ Examples:
         console.error(`  Mismatch: ${(currentMismatchRatio * 100).toFixed(2)}%`);
       }
       console.error(`  Issues: ${compareReport.issues.length}`);
+      // Surface vertical displacement in run-loop per-pass summary
+      {
+        const vs = (compareReport.summary as any).verticalShift as { pixelOffset: number; confidence: number } | undefined;
+        if (vs && Math.abs(vs.pixelOffset) > 20 && vs.confidence > 0.5) {
+          const direction = vs.pixelOffset > 0 ? "downward" : "upward";
+          console.error(`  ⚠ Content appears shifted ~${Math.abs(vs.pixelOffset)}px ${direction} — check heights of containers above the fold.`);
+        }
+      }
 
       // Don't count hierarchy-gated passes toward convergence
       if (!hierarchyGated && currentMismatchRatio <= threshold) {
@@ -951,7 +994,7 @@ Examples:
 
     // Write session log
     const convergenceSummary = buildConvergenceSummary(sessionLog, threshold);
-    const sessionReport = {
+    const sessionReport: any = {
       version: VERSION,
       reference: resolve(refPath),
       implementation: implPath,
@@ -962,6 +1005,9 @@ Examples:
       convergenceSummary,
       log: sessionLog
     };
+    if (runExitReason) {
+      sessionReport.exit_reason = runExitReason;
+    }
 
     await writeFile(
       resolve(outputDir, "session.json"),
@@ -1040,6 +1086,8 @@ program
   .option("--framework <framework>", "Output format: react (Tailwind classes) or vanilla (CSS)", "react")
   .option("--styling <styling>", "Styling approach: tailwind or css", "tailwind")
   .option("--session-best <ratio>", "Session best mismatch ratio — suppresses forward fixes and advises revert when current is worse")
+  .option("--pass <n>", "Current pass number — guards against premature convergence declaration", "1")
+  .option("--session-dir <dir>", "Directory to persist per-pass issue lists for escalation detection")
   .action(async (referencePath, implementationPath, options) => {
     const compareOpts: CompareImagesOptions = {
       top: Number.parseInt(options.top, 10),
@@ -1049,6 +1097,15 @@ program
     };
 
     const report = await compareImages(referencePath, implementationPath, compareOpts);
+
+    // Load semantic label map for region ID replacement
+    const sfLabelMap = await loadSemanticLabelMap(implementationPath, referencePath);
+
+    // Load prior pass issues for escalation detection
+    const currentPassNum = Number(options.pass);
+    const priorIssues = options.sessionDir && currentPassNum >= 2
+      ? await loadPriorSuggestFixesIssues(options.sessionDir, currentPassNum)
+      : [];
 
     // DOM-level comparison if requested
     if (options.domDiff) {
@@ -1086,20 +1143,30 @@ program
     }
 
     // Early exit: if mismatch is within 1.4× irreducible estimate, no further fixes recommended
+    // Requires at least 3 passes to avoid premature convergence on single-pass calls
     if (report.summary.segmented?.irreducibleEstimate != null) {
       const irr = report.summary.segmented.irreducibleEstimate;
       if (report.summary.mismatchRatio < 1.4 * irr) {
-        const topRegionHint = report.summary.gridBreakdown?.[0]?.label;
-        const nearMsg = topRegionHint
-          ? ` Near convergence floor — 1-2 targeted passes recommended, focusing on: ${topRegionHint}.`
-          : "";
-        const msg = `Mismatch (${(report.summary.mismatchRatio * 100).toFixed(1)}%) is within 1.4× of irreducible floor (${(irr * 100).toFixed(1)}%). Remaining differences are likely font rendering, anti-aliasing, and image content. No further CSS changes recommended.${nearMsg}`;
-        if (options.json) {
-          console.log(JSON.stringify({ version: VERSION, converged: true, message: msg, fixes: [] }, null, 2));
+        const currentPass = Number(options.pass);
+        if (currentPass >= 3) {
+          const topRegionHint = report.summary.gridBreakdown?.[0]?.label;
+          const nearMsg = topRegionHint
+            ? ` Near convergence floor — 1-2 targeted passes recommended, focusing on: ${topRegionHint}.`
+            : "";
+          const msg = `Mismatch (${(report.summary.mismatchRatio * 100).toFixed(1)}%) is within 1.4× of irreducible floor (${(irr * 100).toFixed(1)}%). Remaining differences are likely font rendering, anti-aliasing, and image content. No further CSS changes recommended.${nearMsg}`;
+          if (options.json) {
+            console.log(JSON.stringify({ version: VERSION, converged: true, message: msg, fixes: [] }, null, 2));
+          } else {
+            console.log(msg);
+          }
+          return;
         } else {
-          console.log(msg);
+          // Not enough passes to confirm convergence — surface a soft warning but continue with fixes
+          const softMsg = `Mismatch (${(report.summary.mismatchRatio * 100).toFixed(1)}%) is near the estimated floor (${(irr * 100).toFixed(1)}%). Attempt 1-2 more targeted passes before concluding convergence.`;
+          if (!options.json) {
+            console.log(`⚠ ${softMsg}\n`);
+          }
         }
-        return;
       }
     }
 
@@ -1178,6 +1245,26 @@ program
       }
     }
 
+    // Build set of stalled issues from prior pass comparison
+    const stalledIssueKeys = new Set<string>();
+    if (priorIssues.length > 0) {
+      for (const issue of report.issues) {
+        const key = `${issue.code}::${issue.anchorName ?? ""}`;
+        if (priorIssues.some(p => `${p.code}::${p.anchorName ?? ""}` === key)) {
+          stalledIssueKeys.add(key);
+        }
+      }
+    }
+
+    // Save current issues for next pass escalation detection
+    if (options.sessionDir) {
+      const issueRecords: SuggestFixesIssueRecord[] = report.issues.map(i => ({
+        code: i.code,
+        anchorName: i.anchorName
+      }));
+      await saveSuggestFixesIssues(options.sessionDir, currentPassNum, issueRecords);
+    }
+
     if (options.json) {
       const jsonOutput: any = { version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...fixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] };
       if (structuralWarning) jsonOutput.structuralWarning = structuralWarning;
@@ -1192,8 +1279,10 @@ program
     const filteredCount = allFixes.length - fixes.length;
     console.log(`${fixes.length} suggested fixes (ordered by priority)${filteredCount > 0 ? ` (${filteredCount} low-confidence noise items filtered)` : ""}:\n`);
     for (const fix of fixes) {
-      const label = fix.anchorName ? `${fix.anchorName} · ` : "";
-      console.log(`[${fix.priority}] ${fix.category}: ${label}${fix.description} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
+      const resolvedFixAnchor = fix.anchorName ? applySemanticLabels(fix.anchorName, sfLabelMap) : undefined;
+      const label = resolvedFixAnchor ? `${resolvedFixAnchor} · ` : "";
+      const resolvedDesc = applySemanticLabels(fix.description, sfLabelMap);
+      console.log(`[${fix.priority}] ${fix.category}: ${label}${resolvedDesc} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
       if (useTailwind && (fix as any).tailwind) {
         console.log(`  Tailwind: className="${(fix as any).tailwind}"`);
       } else if (fix.css && fix.cssSelector) {
@@ -1205,6 +1294,23 @@ program
       if (fix.cssSelector && !(fix.css && fix.cssSelector && !useTailwind)) {
         console.log(`  Selector: ${fix.cssSelector}`);
       }
+
+      // Escalation block for stalled issues
+      const issueKey = `${(fix as any).issueCode ?? fix.category}::${fix.anchorName ?? ""}`;
+      // Try matching by anchorName+category since fixes may not carry issueCode directly
+      const isStalled = stalledIssueKeys.size > 0 && (
+        stalledIssueKeys.has(issueKey) ||
+        (fix.anchorName && [...stalledIssueKeys].some(k => k.includes(fix.anchorName!)))
+      );
+      if (isStalled) {
+        const categoryCode = (fix as any).issueCode as string | undefined;
+        const hypotheses = getEscalationHypotheses(categoryCode ?? fix.category?.toUpperCase().replace(/-/g, "_") ?? "");
+        const elementLabel = resolvedFixAnchor ?? fix.anchorName ?? "this element";
+        console.log(`  ⚠ Escalation (${currentPassNum - 1} pass${currentPassNum - 1 > 1 ? "es" : ""} unresolved): ${elementLabel} ${fix.category} unchanged.`);
+        console.log(`    Root-cause hypotheses:`);
+        hypotheses.forEach((h, idx) => console.log(`    ${idx + 1}. ${h}`));
+      }
+
       console.log();
     }
 
@@ -1213,8 +1319,10 @@ program
       const reducible = report.summary.mismatchRatio - (report.summary.segmented?.irreducibleEstimate ?? 0);
       console.log(`~${(reducible * 100).toFixed(1)}% mismatch may still be reducible — these suggestions are lower-confidence but worth trying:\n`);
       for (const fix of forceSurfaced) {
-        const label = fix.anchorName ? `${fix.anchorName} · ` : "";
-        console.log(`[Possibly fixable] ${fix.category}: ${label}${fix.description} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
+        const resolvedFsAnchor = fix.anchorName ? applySemanticLabels(fix.anchorName, sfLabelMap) : undefined;
+        const label = resolvedFsAnchor ? `${resolvedFsAnchor} · ` : "";
+        const resolvedFsDesc = applySemanticLabels(fix.description, sfLabelMap);
+        console.log(`[Possibly fixable] ${fix.category}: ${label}${resolvedFsDesc} (confidence: ${(fix.confidence * 100).toFixed(0)}%)`);
         if (fix.css && fix.cssSelector) {
           console.log(`  ${fix.cssSelector} { ${fix.css} }`);
         } else if (fix.css) {
@@ -1291,7 +1399,149 @@ program
     console.log(`Captured screenshot to ${result.outputPath}`);
   });
 
+program
+  .command("serve")
+  .description("Launch a watch-mode server: inspect your live DOM against a reference")
+  .requiredOption("--ref <referencePath>", "Reference screenshot path")
+  .requiredOption("--impl <implPath>", "Path to your HTML file (or http URL)")
+  .option("--port <port>", "HTTP port", "7777")
+  .option("--no-ocr", "Disable OCR text extraction")
+  .action(async (options) => {
+    ensureChromium();
+    const referencePath = resolve(options.ref);
+    const port = Number.parseInt(options.port, 10);
+    if (!Number.isFinite(port) || port <= 0) {
+      console.error(`Invalid --port value: ${options.port}`);
+      process.exit(1);
+    }
+    console.log(`Extracting reference: ${referencePath}`);
+    const extractReport = await extractImageReport(referencePath, {
+      disableOcr: options.ocr === false,
+    });
+    console.log(
+      `  ${extractReport.text?.length ?? 0} text blocks, ${extractReport.layout?.length ?? 0} regions, ${extractReport.semanticAnchors?.length ?? 0} anchors`,
+    );
+    const { runServe } = await import("./serve.js");
+    await runServe({
+      referencePath,
+      implPath: options.impl,
+      port,
+      extractReport,
+    });
+  });
+
 program.parseAsync(process.argv);
+
+// ── Semantic label resolution helpers ──────────────────────────────────────
+
+interface SemanticLabelEntry {
+  name: string;
+  bounds: { x: number; y: number; width: number; height: number };
+}
+
+async function loadSemanticLabelMap(
+  implementationPath: string,
+  referencePath?: string
+): Promise<Map<string, SemanticLabelEntry>> {
+  const map = new Map<string, SemanticLabelEntry>();
+  const candidates: string[] = [dirname(resolve(implementationPath))];
+  if (referencePath) {
+    candidates.push(dirname(resolve(referencePath)));
+  }
+  for (const dir of candidates) {
+    const extractPath = join(dir, "extract.json");
+    try {
+      const content = JSON.parse(await readFile(extractPath, "utf-8"));
+      const anchors: Array<{ nodeId?: string | null; name?: string; bounds?: SemanticLabelEntry["bounds"] }> = content.semanticAnchors ?? [];
+      for (const anchor of anchors) {
+        if (anchor.nodeId && anchor.name && anchor.bounds) {
+          map.set(anchor.nodeId, { name: anchor.name, bounds: anchor.bounds });
+        }
+      }
+      break;
+    } catch {
+      // Not found at this path, try next
+    }
+  }
+  return map;
+}
+
+function resolveRegionToken(
+  regionId: string,
+  labelMap: Map<string, SemanticLabelEntry>
+): string {
+  const entry = labelMap.get(regionId);
+  if (!entry) return regionId;
+  return entry.name || `element at y=${entry.bounds.y}, ${entry.bounds.width}x${entry.bounds.height}px`;
+}
+
+function applySemanticLabels(
+  text: string,
+  labelMap: Map<string, SemanticLabelEntry>
+): string {
+  if (labelMap.size === 0) return text;
+  return text.replace(/\bregion-\d+\b/g, (match) => resolveRegionToken(match, labelMap));
+}
+
+// ── Escalation hypotheses for suggest-fixes ────────────────────────────────
+
+const ESCALATION_HYPOTHESES: Record<string, string[]> = {
+  SIZE_MISMATCH: [
+    "Parent container may constrain height — check for height:100%, overflow:hidden, or max-height on ancestors",
+    "Flex/grid auto-sizing may collapse the element — set an explicit height directly on the element",
+    "A sibling or overlay may be clipping — inspect z-index and overflow on the wrapper"
+  ],
+  POSITION_MISMATCH: [
+    "Margin-auto drift — if using margin:auto, a container width change may shift the element",
+    "Relative position anchor shifted — check if a fixed/sticky parent was added or removed",
+    "Flex item order or justify-content setting may be redistributing space differently"
+  ],
+  COLOR_MISMATCH: [
+    "CSS specificity conflict — a more specific selector may be overriding your color",
+    "CSS variable not set on the right scope — check :root vs component-level custom properties",
+    "Inherited color from a parent element — try setting color explicitly on this element"
+  ]
+};
+
+function getEscalationHypotheses(issueCode: string): string[] {
+  return ESCALATION_HYPOTHESES[issueCode] ?? [
+    "The root cause may be a parent container constraint — inspect ancestors in DevTools",
+    "A specificity conflict or inherited property may be preventing the fix from applying",
+    "Check if the element is inside a layout context (flex/grid) that overrides explicit values"
+  ];
+}
+
+interface SuggestFixesIssueRecord {
+  code: string;
+  anchorName?: string;
+}
+
+async function loadPriorSuggestFixesIssues(
+  sessionDir: string,
+  passNum: number
+): Promise<SuggestFixesIssueRecord[]> {
+  const priorPath = join(sessionDir, `pass-${passNum - 1}-suggest-fixes.json`);
+  try {
+    const content = JSON.parse(await readFile(priorPath, "utf-8"));
+    return (content.issues ?? []) as SuggestFixesIssueRecord[];
+  } catch {
+    return [];
+  }
+}
+
+async function saveSuggestFixesIssues(
+  sessionDir: string,
+  passNum: number,
+  issues: SuggestFixesIssueRecord[]
+): Promise<void> {
+  try {
+    await mkdir(sessionDir, { recursive: true });
+    const outPath = join(sessionDir, `pass-${passNum}-suggest-fixes.json`);
+    await writeFile(outPath, JSON.stringify({ issues }, null, 2), "utf-8");
+  } catch {
+    // Best-effort; don't crash if we can't write
+  }
+}
 
 interface ExtractOptions {
   disableOcr?: boolean;
@@ -1446,6 +1696,20 @@ function buildCompactExtract(report: any) {
     };
   }
 
+  const text = (report.text ?? [])
+    .filter((t: any) => t.text && t.text.trim().length > 0)
+    .slice(0, 60)
+    .map((t: any) => ({
+      text: t.text,
+      x: t.bounds?.x ?? 0,
+      y: t.bounds?.y ?? 0,
+      width: t.bounds?.width ?? 0,
+      height: t.bounds?.height ?? 0,
+      fontSize: t.typography?.fontSize ?? null,
+      fontWeight: t.typography?.fontWeight ?? null,
+      confidence: Number((t.confidence ?? 0).toFixed(2))
+    }));
+
   return {
     image: { width: report.image.width, height: report.image.height },
     background: report.diagnostics?.background ?? colors[0]?.hex ?? "#ffffff",
@@ -1456,7 +1720,8 @@ function buildCompactExtract(report: any) {
       confidence: report.layoutStrategy.confidence
     } : undefined,
     gridStructure,
-    regions
+    regions,
+    text
   };
 }
 
@@ -1632,11 +1897,33 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
         if (issue.suggestedFix) {
           fix.css = issue.suggestedFix;
         }
+        // Prepend root-cause sentence using y-delta from reference/implementation
+        {
+          const ref = issue.reference as { x?: number; y?: number } | undefined;
+          const impl = issue.implementation as { x?: number; y?: number } | undefined;
+          if (ref?.y != null && impl?.y != null) {
+            const dy = impl.y - ref.y;
+            if (Math.abs(dy) > 6) {
+              fix.description = `Element is ${Math.abs(dy)}px ${dy > 0 ? "lower" : "higher"} than reference position. ${fix.description}`;
+            }
+          }
+        }
         break;
       }
       case "SIZE_MISMATCH": {
         if (issue.suggestedFix) {
           fix.css = issue.suggestedFix;
+        }
+        // Prepend root-cause sentence using height-delta from reference/implementation
+        {
+          const ref = issue.reference as { width?: number; height?: number } | undefined;
+          const impl = issue.implementation as { width?: number; height?: number } | undefined;
+          if (ref?.height != null && impl?.height != null) {
+            const dy = impl.height - ref.height;
+            if (Math.abs(dy) > 6) {
+              fix.description = `Container is ~${Math.abs(dy)}px ${dy > 0 ? "taller" : "shorter"} than reference — this likely shifts all below-fold content. ${fix.description}`;
+            }
+          }
         }
         break;
       }

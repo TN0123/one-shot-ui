@@ -15,46 +15,64 @@ export async function extractText(imagePath: string, options?: ExtractTextOption
 
   let worker: any = null;
   let preprocessedPath: string | null = null;
+  let scale = 1;
 
   try {
-    preprocessedPath = await preprocessForOcr(imagePath);
+    const preprocess = await preprocessForOcr(imagePath);
+    preprocessedPath = preprocess.outputPath;
+    scale = preprocess.scale;
     const { createWorker } = await import("tesseract.js");
     const image = await loadImage(imagePath);
     worker = await createWorker("eng");
-    const result = await worker!.recognize(preprocessedPath);
+    // tesseract.js v6 default output is { text: true } only; we must opt in to
+    // per-region data via { blocks: true }. Without this, result.data.blocks
+    // is undefined and we silently get zero TextBlocks.
+    const result = await worker!.recognize(preprocessedPath, {}, { text: true, blocks: true });
 
-    const blocks = (result.data.blocks ?? [])
-      .map((block: any, index: number) => {
-        const text = String(block.text ?? "").trim();
-        if (!text) {
-          return null;
+    const lines: Array<{ bbox: any; text: string; confidence: number }> = [];
+    for (const block of result.data.blocks ?? []) {
+      for (const paragraph of block.paragraphs ?? []) {
+        for (const line of paragraph.lines ?? []) {
+          lines.push({
+            bbox: line.bbox,
+            text: String(line.text ?? "").replace(/\s+$/g, ""),
+            confidence: Number(line.confidence ?? 0),
+          });
         }
-        return {
-          id: `text-${index + 1}`,
-          text,
-          confidence: Math.max(0, Math.min(1, Number(block.confidence ?? result.data.confidence ?? 0) / 100)),
-          bounds: {
-            x: Number(block.bbox?.x0 ?? 0),
-            y: Number(block.bbox?.y0 ?? 0),
-            width: Math.max(0, Number(block.bbox?.x1 ?? 0) - Number(block.bbox?.x0 ?? 0)),
-            height: Math.max(0, Number(block.bbox?.y1 ?? 0) - Number(block.bbox?.y0 ?? 0))
-          },
-          typography: estimateTypography(image, {
-            x: Number(block.bbox?.x0 ?? 0),
-            y: Number(block.bbox?.y0 ?? 0),
-            width: Math.max(0, Number(block.bbox?.x1 ?? 0) - Number(block.bbox?.x0 ?? 0)),
-            height: Math.max(0, Number(block.bbox?.y1 ?? 0) - Number(block.bbox?.y0 ?? 0))
-          })
-        };
-      })
-      .filter((block: TextBlock | null): block is TextBlock => block !== null);
+      }
+    }
+
+    const blocks: TextBlock[] = [];
+    let emitted = 0;
+    for (const line of lines) {
+      const text = line.text.trim();
+      if (!text) continue;
+      const bounds = {
+        x: Math.round(Number(line.bbox?.x0 ?? 0) / scale),
+        y: Math.round(Number(line.bbox?.y0 ?? 0) / scale),
+        width: Math.max(0, Math.round((Number(line.bbox?.x1 ?? 0) - Number(line.bbox?.x0 ?? 0)) / scale)),
+        height: Math.max(0, Math.round((Number(line.bbox?.y1 ?? 0) - Number(line.bbox?.y0 ?? 0)) / scale)),
+      };
+      emitted += 1;
+      blocks.push({
+        id: `text-${emitted}`,
+        text,
+        confidence: Math.max(0, Math.min(1, line.confidence / 100)),
+        bounds,
+        typography: estimateTypography(image, bounds),
+      });
+    }
 
     await worker!.terminate();
     return blocks;
-  } catch {
+  } catch (error) {
     if (worker) {
       await worker.terminate().catch(() => undefined);
     }
+    process.stderr.write(
+      `[one-shot-ui] OCR failed: ${error instanceof Error ? error.message : String(error)}\n` +
+      `  Text extraction is empty for ${imagePath}. Use --no-ocr to suppress this, or report at https://github.com/TN0123/one-shot-ui/issues\n`
+    );
     return [];
   } finally {
     if (preprocessedPath) await unlink(preprocessedPath).catch(() => {});
@@ -71,9 +89,12 @@ function estimateTypography(
 
   const { capTop, baseline } = detectBaselineCapHeight(image, bounds);
   const measuredHeight = baseline - capTop;
+  // Font-size ≈ cap-to-baseline height / 0.7 (cap height is ~70% of the CSS
+  // font-size in most web fonts). The earlier formula used `* 0.72` which
+  // undershoots the real size by ~2x and produced values like fs=9 for 20px text.
   const fontSize = measuredHeight > 4
-    ? Math.max(8, Math.round(measuredHeight * 0.72))
-    : Math.max(8, Math.round(bounds.height * 0.58));
+    ? Math.max(8, Math.round(measuredHeight / 0.7))
+    : Math.max(8, Math.round(bounds.height / 0.9));
   const lineHeight = Math.round(bounds.height > fontSize * 2
     ? detectInternalLineHeight(image, bounds, fontSize)
     : fontSize * 1.35);

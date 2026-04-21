@@ -28,6 +28,12 @@ wrong with a UI implementation compared to a reference screenshot.
 6. **Run** — Automated multi-pass refinement loop:
        one-shot-ui run reference.png --impl ./index.html --output ./passes
 
+7. **Serve** *(recommended)* — Watch-mode HTTP server with live DOM-aware queries:
+       one-shot-ui serve --ref reference.png --impl ./index.html --port 7777
+   Returns real CSS diffs anchored to selectors that exist in your HTML, and
+   lets you test candidate fixes via `POST /apply-temp` before committing them.
+   This is the fastest path to convergence for an agent.
+
 ## Commands Reference
 
 | Command         | Purpose                                    | Key Flags                          |
@@ -39,7 +45,16 @@ wrong with a UI implementation compared to a reference screenshot.
 | capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output            |
 | suggest-fixes   | Tailwind/CSS fix suggestions from diff     | --json, --top, --dom-diff, --framework |
 | run             | Multi-pass refinement loop                 | --impl, --max-passes, --threshold  |
+| serve           | Watch-mode DOM-aware query server          | --ref, --impl, --port              |
 | benchmark       | Run benchmark suites                       | --json, --output                   |
+
+### `serve` endpoints (HTTP, default port 7777)
+
+- `GET /reference` — colors, text, regions, semantic anchors from the reference
+- `GET /status` — current mismatch ratio + top mismatched regions
+- `GET /element?selector=<css>` — your live computed styles vs. the reference region at the same bounds, plus a `diffs[]` array with valid CSS suggestions
+- `POST /apply-temp` `{selector, css}` — trial a CSS change, return `{globalDelta, scopedDelta, verdict}` without persisting
+- `POST /reload` — manual reload (not usually needed; the file watcher auto-reloads ~120ms after save)
 
 ## Output Format
 
