@@ -1,12 +1,73 @@
 import type { LayoutNode, LayoutStrategy, SpacingMeasurement } from "@one-shot-ui/core";
-import { detectBackgroundColor, rgbToHex, samplePixel, type ImageAsset } from "@one-shot-ui/image-io";
+import { rgbToHex, samplePixel, type ImageAsset } from "@one-shot-ui/image-io";
 
 const GRID_SIZE = 8;
+
+/**
+ * Robustly estimate the dominant background fill of an image.
+ *
+ * The previous heuristic (`detectBackgroundColor`) averaged only the four
+ * corners. That collapses on:
+ *   - colored/gradient headers that occupy the corners (mobile screens),
+ *   - auto-resized screenshots padded with solid white on two edges,
+ *   - any UI whose corners are not representative of the real page surface.
+ * When the chosen "background" is wrong, nearly every grid cell reads as
+ * "active" and the flood-fill segmentation floods the whole frame into a
+ * single giant component (matchedLayoutNodes -> 0).
+ *
+ * Instead we take the mode of the full frame: bucket pixels into coarse
+ * color bins (4-bit per channel) and return the average color of the most
+ * populous bin. The dominant surface of a UI is, by construction, the
+ * background — and unlike corner sampling it ignores unrepresentative
+ * borders and padding.
+ */
+export function detectDominantBackground(image: ImageAsset): { r: number; g: number; b: number } {
+  const buckets = new Map<number, { r: number; g: number; b: number; n: number }>();
+  // Cap the number of samples (~90k) so this stays cheap on large images.
+  const step = Math.max(2, Math.floor(Math.min(image.width, image.height) / 300));
+
+  for (let y = 0; y < image.height; y += step) {
+    for (let x = 0; x < image.width; x += step) {
+      const [r, g, b, a] = samplePixel(image, x, y);
+      if (a < 8) {
+        continue;
+      }
+      // 4 bits per channel -> 12-bit key (4096 bins).
+      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+      const entry = buckets.get(key);
+      if (entry) {
+        entry.r += r;
+        entry.g += g;
+        entry.b += b;
+        entry.n += 1;
+      } else {
+        buckets.set(key, { r, g, b, n: 1 });
+      }
+    }
+  }
+
+  let best: { r: number; g: number; b: number; n: number } | null = null;
+  for (const entry of buckets.values()) {
+    if (!best || entry.n > best.n) {
+      best = entry;
+    }
+  }
+
+  if (!best) {
+    return { r: 255, g: 255, b: 255 };
+  }
+
+  return {
+    r: Math.round(best.r / best.n),
+    g: Math.round(best.g / best.n),
+    b: Math.round(best.b / best.n)
+  };
+}
 
 export function detectLayoutBoxes(image: ImageAsset): LayoutNode[] {
   const cols = Math.ceil(image.width / GRID_SIZE);
   const rows = Math.ceil(image.height / GRID_SIZE);
-  const background = hexToRgb(detectBackgroundColor(image));
+  const background = detectDominantBackground(image);
   const active = Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
 
   for (let row = 0; row < rows; row++) {
@@ -378,15 +439,6 @@ function floodFill(active: boolean[][], visited: boolean[][], startX: number, st
   return points;
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const normalized = hex.replace("#", "");
-  return {
-    r: Number.parseInt(normalized.slice(0, 2), 16),
-    g: Number.parseInt(normalized.slice(2, 4), 16),
-    b: Number.parseInt(normalized.slice(4, 6), 16)
-  };
-}
-
 function findNearestSpacing(
   source: LayoutNode,
   nodes: LayoutNode[],
@@ -586,7 +638,7 @@ export function detectLayoutBoxesFine(image: ImageAsset): LayoutNode[] {
   const FINE_GRID = 4;
   const cols = Math.ceil(image.width / FINE_GRID);
   const rows = Math.ceil(image.height / FINE_GRID);
-  const background = hexToRgb(detectBackgroundColor(image));
+  const background = detectDominantBackground(image);
   const active = Array.from({ length: rows }, () => Array.from({ length: cols }, () => false));
 
   for (let row = 0; row < rows; row++) {
