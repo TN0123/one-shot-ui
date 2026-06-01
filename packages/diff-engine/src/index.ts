@@ -19,6 +19,7 @@ import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, e
 import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
 import { segmentMismatch } from "./segmented-mismatch.js";
 import { detectLayoutCollapse } from "./layout-collapse.js";
+import { collapseReflowCascade } from "./reflow.js";
 
 export interface CompareImagesOptions {
   heatmapPath?: string;
@@ -400,8 +401,12 @@ export async function compareImages(
     }
   }
 
+  // Collapse reflow: a removed/added element shifts everything below it; report that as one note
+  // rather than N independent (often contradictory) position fixes.
+  const dereflowed = collapseReflowCascade(issues);
+
   // Filter low-contribution issues: suppress issues whose mismatch contribution is <1% of total
-  const filteredByContribution = issues.filter(issue => {
+  const filteredByContribution = dereflowed.filter(issue => {
     if (!issue.issueBounds) return true; // Keep issues without bounds (PIXEL_DIFFERENCE, etc.)
     if (issue.code === "DIMENSION_MISMATCH" || issue.code === "PIXEL_DIFFERENCE" || issue.code === "REGION_SEMANTIC_FALLBACK") return true;
     const issueBoundsArea = issue.issueBounds.width * issue.issueBounds.height;
