@@ -37,6 +37,7 @@ import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, e
 import { extractText } from "@one-shot-ui/vision-text";
 import { labelNodes } from "@one-shot-ui/semantic-label";
 import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
+import { resolveFixTarget, inferCssCategory } from "./fix-target.js";
 
 const program = new Command();
 program.name("one-shot-ui").description("Deterministic UI extraction and diff toolkit").version(VERSION);
@@ -1773,40 +1774,6 @@ function scopeLayout(
  * Infer a CSS selector from an element's bounding box position and size.
  * Provides actionable selectors based on semantic role inference.
  */
-function inferSelectorFromBounds(bounds: Bounds): string | null {
-  // Use common viewport dimensions as reference (1440x900)
-  const viewportWidth = 1440;
-  const viewportHeight = 900;
-
-  const widthRatio = bounds.width / viewportWidth;
-  const heightRatio = bounds.height / viewportHeight;
-  const topRatio = bounds.y / viewportHeight;
-  const bottomEdge = (bounds.y + bounds.height) / viewportHeight;
-
-  // Full-width top element = likely header/nav
-  if (widthRatio > 0.8 && heightRatio < 0.15 && topRatio < 0.05) {
-    return "header, nav, [class*='header'], [class*='nav']";
-  }
-  // Full-width bottom element = likely footer
-  if (widthRatio > 0.8 && heightRatio < 0.15 && bottomEdge > 0.9) {
-    return "footer, [class*='footer']";
-  }
-  // Tall narrow element on left/right = sidebar
-  if (heightRatio > 0.4 && widthRatio < 0.25) {
-    return "aside, [class*='sidebar'], [class*='side']";
-  }
-  // Large central element = main content
-  if (widthRatio > 0.5 && heightRatio > 0.3) {
-    return "main, [class*='main'], [class*='content']";
-  }
-  // Small square element = likely card, button, or icon
-  if (bounds.width < 300 && bounds.height < 300 && Math.abs(bounds.width - bounds.height) < 50) {
-    return `div:nth-child(n) /* ~${bounds.width}x${bounds.height} element at (${bounds.x},${bounds.y}) */`;
-  }
-
-  return null;
-}
-
 function resolveRegionBounds(region: string | undefined, anchors: Array<{ name: string; bounds: Bounds }>): Bounds | undefined {
   if (!region) {
     return undefined;
@@ -1845,23 +1812,6 @@ type ImplementationFix = {
   cssSelector?: string;
   confidence: number;
 };
-
-function inferCssCategory(issueCode: string): string | undefined {
-  const map: Record<string, string> = {
-    POSITION_MISMATCH: "position/margin/padding",
-    SIZE_MISMATCH: "width/height",
-    SPACING_MISMATCH: "margin/padding/gap",
-    BORDER_RADIUS_MISMATCH: "border-radius",
-    COLOR_MISMATCH: "background-color",
-    COLOR_MISMATCH_AT_POSITION: "background-color",
-    SHADOW_MISMATCH: "box-shadow",
-    GRADIENT_MISMATCH: "background",
-    FONT_SIZE_MISMATCH: "font-size",
-    FONT_WEIGHT_MISMATCH: "font-weight",
-    FONT_FAMILY_MISMATCH: "font-family",
-  };
-  return map[issueCode];
-}
 
 function generateImplementationGuidance(report: { issues: Array<{ code: string; nodeId?: string; anchorName?: string; anchorId?: string; severity: string; message: string; suggestedFix?: string; cssProperty?: string; cssSelector?: string; reference?: unknown; implementation?: unknown; issueBounds?: Bounds }> }): ImplementationFix[] {
   const fixes: ImplementationFix[] = [];
@@ -2001,44 +1951,14 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       }
     }
 
-    // Ensure every fix has a CSS selector
-    if (!fix.cssSelector && issue.cssSelector) {
-      fix.cssSelector = issue.cssSelector;
-    }
-    if (!fix.cssSelector && issue.anchorName) {
-      if (isScaffoldGenerated) {
-        // Use data-anchor attribute selectors when available
-        fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-      } else {
-        // Manually-built HTML: derive a semantic class name suggestion
-        // without referencing data-anchor attributes
-        fix.cssSelector = `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-      }
-    }
-    if (!fix.cssSelector && issue.nodeId) {
-      if (isScaffoldGenerated) {
-        fix.cssSelector = `[data-node="${issue.nodeId}"]`;
-      } else {
-        // For manually-built HTML, fall back to CSS property category instead of node IDs
-        const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
-        if (cssProp) {
-          fix.description = `${fix.description} (target element with ${cssProp})`;
-        }
-      }
-    }
-
-    // For manually-built HTML with issueBounds but no selector, use bounding-box
-    // overlap to infer a meaningful semantic selector
-    if (!fix.cssSelector && !isScaffoldGenerated && issue.issueBounds) {
-      const b = issue.issueBounds;
-      const cssProp = issue.cssProperty ?? inferCssCategory(issue.code);
-      // Infer a semantic selector from the element's position and size on the page
-      const inferredSelector = inferSelectorFromBounds(b);
-      if (inferredSelector) {
-        fix.cssSelector = inferredSelector;
-        fix.confidence = Math.max(fix.confidence, 0.5);
-      }
-      fix.description = `${fix.description} (element near ${b.x},${b.y} ${b.width}x${b.height}${cssProp ? `, adjust ${cssProp}` : ""})`;
+    // Decide what the agent should act on. From a screenshot we usually cannot know the
+    // real selector, so resolveFixTarget refuses to fabricate one from OCR text and instead
+    // returns the region + property hint the agent can locate itself (see fix-target.ts).
+    const target = resolveFixTarget(issue, isScaffoldGenerated);
+    if (target.cssSelector) {
+      fix.cssSelector = target.cssSelector;
+    } else if (target.descriptor) {
+      fix.description = `${fix.description} (${target.descriptor})`;
     }
 
     // Fallback: always provide at least a color suggestion
@@ -2057,10 +1977,13 @@ function generateImplementationGuidance(report: { issues: Array<{ code: string; 
       }
     }
 
-    // Assign confidence based on specificity
-    fix.confidence = fix.css && fix.cssSelector ? 0.9 :
-                     fix.css ? 0.6 :
-                     fix.cssSelector ? 0.4 : 0.2;
+    // Confidence reflects how trustworthy the TARGET is, not merely whether fields are
+    // filled. A screenshot-only fix (region descriptor, no real selector) is capped so an
+    // agent treats it as "inspect this", never as a confident apply.
+    const baseConfidence = fix.css && fix.cssSelector ? 0.9 :
+                           fix.css ? 0.6 :
+                           fix.cssSelector ? 0.4 : 0.2;
+    fix.confidence = Math.min(baseConfidence, target.confidenceCap);
 
     fixes.push(fix);
   }
@@ -2331,8 +2254,10 @@ function buildNextActions(compareReport: any, passNumber: number) {
     const areaRatio = imgArea > 0 ? boundsArea / imgArea : 0;
     if (areaRatio > 0.15) { filteredHighRisk++; continue; }
 
-    const selector = issue.cssSelector
-      ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined);
+    // Auto-apply must target a REAL selector. We cannot derive one from a screenshot, so a
+    // slug of OCR text would point at nothing — never fabricate one here; skip instead. Such
+    // issues are still surfaced as observations via suggest-fixes.
+    const selector = issue.cssSelector;
     if (!selector) { filteredNoSelector++; continue; }
 
     let cssProps = extractCssProperties(issue);
@@ -2421,7 +2346,9 @@ function buildNextActions(compareReport: any, passNumber: number) {
     .map((issue: any) => ({
       action: "add-element",
       anchorName: issue.anchorName,
-      selector: issue.cssSelector ?? (issue.anchorName ? `.${issue.anchorName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : undefined),
+      // Real selector only (may be undefined); the agent adds the element from anchorName +
+      // referenceStyles rather than selecting a phantom class.
+      selector: issue.cssSelector,
       description: issue.message,
       referenceStyles: issue.reference ? {
         ...(issue.reference.bounds ? {
