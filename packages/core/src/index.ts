@@ -283,6 +283,7 @@ export const compareIssueSchema = z.object({
       "MISSING_NODE",
       "EXTRA_NODE",
       "LAYOUT_COUNT_MISMATCH",
+      "LAYOUT_COLLAPSE",
       "TEXT_COUNT_MISMATCH",
       "DOM_POSITION_MISMATCH",
       "DOM_SIZE_MISMATCH",

@@ -18,6 +18,7 @@ import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
 import { segmentMismatch } from "./segmented-mismatch.js";
+import { detectLayoutCollapse } from "./layout-collapse.js";
 
 export interface CompareImagesOptions {
   heatmapPath?: string;
@@ -206,6 +207,16 @@ export async function compareImages(
 
   const layoutMatches = matchLayoutNodes(referenceLayout, implementationLayout);
   const matchedImplementationIds = new Set(layoutMatches.map((match) => match.implementation.id));
+
+  // Loudly flag when layout matching collapsed (e.g. uniform dark fills, mobile surfaces)
+  // instead of silently emitting phantom structural fixes from zero real matches.
+  const layoutCollapse = detectLayoutCollapse({
+    referenceNodeCount: referenceLayout.length,
+    matchedNodeCount: layoutMatches.length,
+  });
+  if (layoutCollapse) {
+    issues.push(layoutCollapse);
+  }
 
   const totalImageArea = width * height;
 
