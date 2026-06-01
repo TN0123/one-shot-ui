@@ -20,6 +20,8 @@ import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
 import { segmentMismatch } from "./segmented-mismatch.js";
 import { detectLayoutCollapse } from "./layout-collapse.js";
 import { collapseReflowCascade } from "./reflow.js";
+import { keepIssueByContribution } from "./issue-filter.js";
+import { isMeaningfulRecolor } from "./recolor.js";
 
 export interface CompareImagesOptions {
   heatmapPath?: string;
@@ -223,7 +225,7 @@ export async function compareImages(
 
   if (!focusDiagnostics.fallbackToPixelOnly) {
     for (const match of layoutMatches) {
-      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors, totalImageArea, width, height));
+      issues.push(...compareMatchedNodes(match.reference, match.implementation, referenceAnchors, totalImageArea, width, height, refBg));
     }
 
     for (const node of referenceLayout) {
@@ -405,16 +407,10 @@ export async function compareImages(
   // rather than N independent (often contradictory) position fixes.
   const dereflowed = collapseReflowCascade(issues);
 
-  // Filter low-contribution issues: suppress issues whose mismatch contribution is <1% of total
-  const filteredByContribution = dereflowed.filter(issue => {
-    if (!issue.issueBounds) return true; // Keep issues without bounds (PIXEL_DIFFERENCE, etc.)
-    if (issue.code === "DIMENSION_MISMATCH" || issue.code === "PIXEL_DIFFERENCE" || issue.code === "REGION_SEMANTIC_FALLBACK") return true;
-    const issueBoundsArea = issue.issueBounds.width * issue.issueBounds.height;
-    const totalArea = width * height;
-    if (totalArea === 0) return true;
-    const contribution = issueBoundsArea / totalArea;
-    return contribution >= 0.01;
-  });
+  // Filter low-contribution issues: suppress issues whose mismatch covers <1% of the image.
+  // Colour and whole-image signals are exempt — a recoloured button is small but actionable.
+  const totalImagePixels = width * height;
+  const filteredByContribution = dereflowed.filter((issue) => keepIssueByContribution(issue, totalImagePixels));
 
   // Noise reduction: filter low-confidence issues and cap the list
   const filteredIssues = applyNoiseReduction(sortIssues(filteredByContribution), confidenceThreshold, top);
@@ -806,7 +802,7 @@ function matchLayoutNodes(referenceNodes: LayoutNode[], implementationNodes: Lay
   return matches;
 }
 
-function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[], totalImageArea = 1, imageWidth = 0, imageHeight = 0): CompareIssue[] {
+function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, anchors: SemanticAnchor[], totalImageArea = 1, imageWidth = 0, imageHeight = 0, backgroundHex = ""): CompareIssue[] {
   const issues: CompareIssue[] = [];
   const anchor = resolveAnchor(anchors, reference);
   const anchorName = describeAnchor(anchor, reference.id);
@@ -880,24 +876,25 @@ function compareMatchedNodes(reference: LayoutNode, implementation: LayoutNode, 
     }
   }
 
-  if (reference.fill && implementation.fill) {
-    const colorDelta = hexDistance(reference.fill, implementation.fill);
-    if (colorDelta >= 24) {
-      issues.push({
-        code: "COLOR_MISMATCH",
-        nodeId: reference.id,
-        anchorId: anchor?.id,
-        anchorName: anchor?.name,
-        contextPath,
-        severity: colorDelta >= 64 ? "medium" : "low",
-        message: `${anchorName} fill color differs from the reference.`,
-        suggestedFix: `Change the fill color to ${reference.fill}.`,
-        reference: { fill: reference.fill },
-        implementation: { fill: implementation.fill },
-        issueBounds: reference.bounds,
-        visualWeight: vw
-      });
-    }
+  // Only report a real recolor: both fills present, clearly different, and neither is the page
+  // background (a background-coloured side means content moved in/out, not a recolor — the main
+  // source of false-positive colour issues when matching pairs elements imperfectly under reflow).
+  if (isMeaningfulRecolor(reference.fill, implementation.fill, backgroundHex)) {
+    const colorDelta = hexDistance(reference.fill!, implementation.fill!);
+    issues.push({
+      code: "COLOR_MISMATCH",
+      nodeId: reference.id,
+      anchorId: anchor?.id,
+      anchorName: anchor?.name,
+      contextPath,
+      severity: colorDelta >= 64 ? "medium" : "low",
+      message: `${anchorName} fill color differs from the reference.`,
+      suggestedFix: `Change the fill color to ${reference.fill}.`,
+      reference: { fill: reference.fill },
+      implementation: { fill: implementation.fill },
+      issueBounds: reference.bounds,
+      visualWeight: vw
+    });
   }
 
   // Shadow comparison
