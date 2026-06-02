@@ -1431,6 +1431,39 @@ program
     });
   });
 
+program
+  .command("mcp")
+  .description("Run the one-shot-ui MCP server (stdio) so AI agents/clients can call compare, extract, suggest-fixes, tokens, and plan as tools")
+  .action(async () => {
+    const { spawn } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const here = dirname(fileURLToPath(import.meta.url));
+    // Published layout: dist/cli.mjs sits beside dist/mcp.mjs.
+    const builtCandidates = [
+      join(here, "mcp.mjs"),
+      join(here, "..", "dist", "mcp.mjs"),
+      join(here, "..", "..", "..", "dist", "mcp.mjs"),
+    ];
+    const built = builtCandidates.find((candidate) => existsSync(candidate));
+    let cmd: string;
+    let cmdArgs: string[];
+    if (built) {
+      cmd = process.execPath;
+      cmdArgs = [built];
+    } else {
+      // Dev fallback: run the TypeScript source with Bun.
+      cmd = "bun";
+      cmdArgs = [join(here, "..", "..", "mcp", "src", "index.ts")];
+    }
+    // Inherit stdio so the child's stdin/stdout carry the MCP JSON-RPC stream directly.
+    const child = spawn(cmd, cmdArgs, { stdio: "inherit", env: process.env });
+    child.on("exit", (code) => process.exit(code ?? 0));
+    child.on("error", (err) => {
+      console.error(`Failed to start MCP server: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+  });
+
 program.parseAsync(process.argv);
 
 // ── Semantic label resolution helpers ──────────────────────────────────────

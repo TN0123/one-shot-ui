@@ -83,6 +83,32 @@ Install the skill in one line:
 mkdir -p .claude/skills/one-shot-ui && cp "$(npm root -g)/one-shot-ui/skill/SKILL.md" .claude/skills/one-shot-ui/
 ```
 
+## Use it as an MCP server
+
+`one-shot-ui` also runs as a local [MCP](https://modelcontextprotocol.io) server, so any
+MCP-capable agent (Claude Code, Cursor, Cline, Windsurf, VS Code) can call `compare`,
+`suggest_fixes`, `extract`, `tokens`, and `plan` as tools — no shell glue. It runs over stdio,
+makes no network calls, and needs no API keys.
+
+```sh
+claude mcp add one-shot-ui -- npx -y one-shot-ui mcp
+```
+
+Or add to any client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "one-shot-ui": {
+      "command": "npx",
+      "args": ["-y", "one-shot-ui", "mcp"]
+    }
+  }
+}
+```
+
+See [docs/MCP.md](./docs/MCP.md) for per-client setup and registry publishing.
+
 ## Commands
 
 | Command | Purpose | Key Flags |

@@ -46,7 +46,12 @@ wrong with a UI implementation compared to a reference screenshot.
 | suggest-fixes   | Tailwind/CSS fix suggestions from diff     | --json, --top, --dom-diff, --framework |
 | run             | Multi-pass refinement loop                 | --impl, --max-passes, --threshold  |
 | serve           | Watch-mode DOM-aware query server          | --ref, --impl, --port              |
+| mcp             | Run as an MCP server (stdio) for agents    | —                                  |
 | benchmark       | Run benchmark suites                       | --json, --output                   |
+
+If your client speaks MCP, you can skip the CLI entirely: `one-shot-ui mcp` exposes
+`compare`, `suggest_fixes`, `extract`, `tokens`, and `plan` as tools (stdio, local, no API
+keys). See `docs/MCP.md`.
 
 ### `serve` endpoints (HTTP, default port 7777)
 
