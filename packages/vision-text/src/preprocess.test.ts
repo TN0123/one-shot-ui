@@ -31,7 +31,9 @@ describe("preprocessForOcr", () => {
 
     const result = await preprocessForOcr(inputPath);
     expect(result.outputPath).toBe(expectedOutput);
-    expect(result.scale).toBe(1);
+    // 50x50 is < 300px tall, so it is upscaled 2x (see "upscales small images").
+    // This test's purpose is the inversion assertion below.
+    expect(result.scale).toBe(2);
     expect(existsSync(result.outputPath)).toBe(true);
 
     // Verify the output was inverted: dark input corners should now be light
