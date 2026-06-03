@@ -19,10 +19,17 @@ screenshots and compare your implementations against them.
 ### Step 1: Extract the design
 Run `one-shot-ui extract <reference.png> --json --overlay` to get:
 - Layout nodes with positions, sizes, colors, gradients, shadows, border radii
-- Text blocks with content, font size, weight, color
+- Text blocks with content, font size, weight, color, and `monospace`
 - Design tokens (spacing scale, color palette, radius scale)
 - Component clusters (repeated visual patterns)
 - Implementation plan (suggested CSS strategy: grid/flex/absolute)
+
+**Pass `--dpr` for Retina/Mac screenshots.** A 2x screenshot reports every pixel at
+double its CSS value (a 35px heading measures 70px), which throws off fonts, spacing
+and sizing. If you know the screenshot is from a Retina/Mac display, pass `--dpr 2` so
+sizes and bounds come back in CSS pixels. Otherwise check the report's `scale` block:
+`units: "css-px"` means values are normalized; a `scale.scaleHint` means it might be
+Retina and you should re-run with `--dpr 2`. Build to the reported CSS pixels.
 
 ### Step 2: Build the UI
 Use the extracted data to write the implementation directly. Set exact:
@@ -36,9 +43,18 @@ Run `one-shot-ui capture --url http://localhost:3000 --output impl.png` then
 `one-shot-ui compare <reference.png> impl.png --json --heatmap heatmap.png`.
 
 Read the heatmap to see where differences are. The JSON report includes:
+- `summary.verdict` — `{ status: "converged" | "not-converged", reasons[], completeness }`.
+  **This is your stop signal, not the pixel %.** Keep iterating while
+  `status` is `not-converged`. The pixel `mismatchRatio` is dominated by background and
+  reads as "almost done" even when most elements are missing — do not trust it alone.
 - `mismatchRatio` — overall pixel difference (0.0 = perfect match)
 - `issues[]` — categorized problems (COLOR_MISMATCH, SPACING_MISMATCH, etc.)
 - `topEditCandidates[]` — ranked list of what to fix first
+
+The `--summary` flag prints one line that leads with `VERDICT: CONVERGED / NOT CONVERGED`
+and the reasons (e.g. missing structural coverage, low hierarchy, a region holding most
+of the mismatch). Address the reasons, re-compare, and only stop once it reports
+CONVERGED.
 
 ### Step 4: Fix issues
 Run `one-shot-ui suggest-fixes <reference.png> impl.png --json` to get specific
@@ -80,6 +96,18 @@ All commands support `--json`. Always use it. Key schemas:
 
 ## Important Notes
 
+- **macOS screenshot paths.** If the user takes a screenshot and drags the floating
+  thumbnail in, the path may point at a temporary location (e.g.
+  `…/TemporaryItems/NSIRD_screencaptureui_*/Screenshot ….png`) that macOS moves to
+  `~/Desktop` once the thumbnail dismisses. If a command reports the file is a moved
+  macOS screenshot, ask the user for the saved path (usually `~/Desktop/Screenshot ….png`)
+  or have them save it into the project first.
+- **Reference scale.** Pass `--dpr 2` for Retina/Mac screenshots (see Step 1). Sizes and
+  bounds in the compact report are then CSS pixels — build to those directly.
+- **Typography.** `extract` measures font size, weight, and monospace-vs-proportional
+  from pixels reliably; serif-vs-sans and the exact typeface are best-guess candidates
+  (`fontFamilyCandidates`) — confirm the typeface against the screenshot. See
+  `typographyNote` in the report.
 - Chromium must be installed: `npx playwright install chromium`
 - Use `--no-ocr` to skip OCR if text extraction isn't needed (faster)
 - Use `--fine` for UIs with small details (icons, small buttons)

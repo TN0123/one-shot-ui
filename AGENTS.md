@@ -12,6 +12,10 @@ wrong with a UI implementation compared to a reference screenshot.
 
 1. **Extract** — Analyze a reference screenshot into structured layout data:
        one-shot-ui extract reference.png --json
+   For Retina/Mac screenshots, add `--dpr 2` so font sizes and bounds are reported in
+   CSS pixels (a 2x capture otherwise doubles every measurement). When omitted, scale is
+   auto-detected; check the report's `scale`/`units` and re-run with `--dpr 2` if it hints
+   the image is Retina.
 
 2. **Build** — Use the extracted data (colors, spacing, typography, tokens) to
    build your implementation. The agent should write the UI code directly.
@@ -21,6 +25,9 @@ wrong with a UI implementation compared to a reference screenshot.
 
 4. **Compare** — Diff reference vs implementation:
        one-shot-ui compare reference.png impl.png --json --heatmap heatmap.png
+   Use `summary.verdict` (`converged` / `not-converged` + reasons) as your stop signal —
+   not the pixel `mismatchRatio`, which is background-dominated and reads as "almost done"
+   even when most elements are missing. Keep iterating until the verdict is `converged`.
 
 5. **Suggest Fixes** — Get actionable CSS fix suggestions:
        one-shot-ui suggest-fixes reference.png impl.png --json
@@ -69,6 +76,17 @@ with Zod schemas and follow stable interfaces.
 ## Tips for Agents
 
 - Always use `--json` to get structured output you can parse.
+- **Pass `--dpr 2` for Retina/Mac screenshots** (CLI) or `dpr: 2` (MCP). This is the
+  single biggest accuracy win — without it, a 2x screenshot's 35px heading and 8px gaps
+  are reported as 70px and 16px, throwing off fonts, spacing, and sizing together.
+- **Stop on the verdict, not the percentage.** `compare`/`suggest-fixes` report
+  `summary.verdict`; a low `mismatchRatio` with `status: "not-converged"` means you are
+  missing structure/content, not done. Iterate until `converged`.
+- **macOS screenshots:** if a path under `…/TemporaryItems/NSIRD_screencaptureui_*/` or a
+  just-dragged `Screenshot ….png` is reported missing, macOS has moved it to `~/Desktop` —
+  use the saved path or copy it into the project first.
+- **Typography:** font size, weight, and monospace-vs-proportional are measured; serif-vs-
+  sans and the exact typeface in `fontFamilyCandidates` are best guesses — confirm visually.
 - The `extract --overlay` flag adds bounding-box annotations useful for
   vision-model cross-referencing.
 - The `run` command handles the full extract→capture→compare→fix loop
