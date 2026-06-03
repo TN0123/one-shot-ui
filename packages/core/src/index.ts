@@ -216,9 +216,19 @@ export const implementationPlanSchema = z.object({
   }),
 });
 
+export const scaleInfoSchema = z.object({
+  /** Effective device pixel ratio applied to reported geometry (1 = raw image px). */
+  dpr: z.number().positive(),
+  source: z.enum(["explicit", "auto", "default"]),
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+  scaleHint: z.string().optional(),
+});
+
 export const extractReportSchema = z.object({
   version: z.string(),
   image: imageMetaSchema,
+  scale: scaleInfoSchema.optional(),
   colors: z.array(colorSwatchSchema),
   layout: z.array(layoutNodeSchema),
   text: z.array(textBlockSchema),

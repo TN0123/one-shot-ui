@@ -67,6 +67,7 @@ const extract: ToolSpec = {
     fine: z.boolean().optional().describe("Use fine-grained (4px) layout detection for small details."),
     disable_ocr: z.boolean().optional().describe("Skip OCR text extraction. OCR runs by default and roughly doubles latency; disable it when you don't need text content or typography (note: extract then returns empty fontSizes)."),
     full: z.boolean().optional().describe("Return the full detailed report instead of the compact summary."),
+    dpr: z.number().positive().optional().describe("Device pixel ratio of the screenshot (pass 2 for a Retina/Mac capture). When set, the compact report's font sizes and region bounds are returned in CSS pixels instead of raw image pixels. Auto-detected when omitted, but passing it is more reliable."),
   },
   build(a) {
     return {
@@ -78,6 +79,7 @@ const extract: ToolSpec = {
         ...flag(a.fine, "--fine"),
         ...flag(a.disable_ocr, "--no-ocr"),
         ...flag(a.full, "--no-compact"),
+        ...flag(a.dpr, "--dpr", String(a.dpr)),
       ],
     };
   },
@@ -128,11 +130,12 @@ const tokens: ToolSpec = {
   inputSchema: {
     image_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the screenshot to analyze."),
     disable_ocr: z.boolean().optional().describe("Skip OCR text extraction. OCR runs by default and roughly doubles latency; disable it when you don't need text content or typography (note: extract then returns empty fontSizes)."),
+    dpr: z.number().positive().optional().describe("Device pixel ratio of the screenshot (pass 2 for a Retina/Mac capture). When set, spacing/font-size/radius tokens are returned in CSS pixels instead of raw image pixels. Auto-detected when omitted."),
   },
   build(a) {
     return {
       command: "tokens",
-      cliArgs: ["tokens", String(a.image_path), "--json", ...flag(a.disable_ocr, "--no-ocr")],
+      cliArgs: ["tokens", String(a.image_path), "--json", ...flag(a.disable_ocr, "--no-ocr"), ...flag(a.dpr, "--dpr", String(a.dpr))],
     };
   },
 };
@@ -146,11 +149,12 @@ const plan: ToolSpec = {
   inputSchema: {
     image_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the screenshot to analyze."),
     disable_ocr: z.boolean().optional().describe("Skip OCR text extraction. OCR runs by default and roughly doubles latency; disable it when you don't need text content or typography (note: extract then returns empty fontSizes)."),
+    dpr: z.number().positive().optional().describe("Device pixel ratio of the screenshot (pass 2 for a Retina/Mac capture). Auto-detected when omitted."),
   },
   build(a) {
     return {
       command: "plan",
-      cliArgs: ["plan", String(a.image_path), "--json", ...flag(a.disable_ocr, "--no-ocr")],
+      cliArgs: ["plan", String(a.image_path), "--json", ...flag(a.disable_ocr, "--no-ocr"), ...flag(a.dpr, "--dpr", String(a.dpr))],
     };
   },
 };

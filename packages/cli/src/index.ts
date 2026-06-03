@@ -31,7 +31,7 @@ import {
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
 import { captureScreenshot, BlankCaptureError } from "@one-shot-ui/browser-capture";
 import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
-import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions } from "@one-shot-ui/image-io";
+import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions, estimateDpr, resolveDpr, applyDpr } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
@@ -60,6 +60,23 @@ function assertInputExists(label: string, p: string): void {
   }
 }
 
+/** Parse a --dpr flag value into a positive number, or undefined to auto-detect. */
+function parseDprOption(raw: string | undefined): number | undefined {
+  if (raw == null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/** Normalize a px-valued design token to CSS px for the given dpr; pass others through. */
+function normalizeTokenValue(token: { type?: string; value: unknown }, dpr: number): unknown {
+  if (dpr === 1) return token.value;
+  if (token.type === "spacing" || token.type === "fontSize" || token.type === "radius") {
+    const m = /^(-?\d+(?:\.\d+)?)px$/.exec(String(token.value).trim());
+    if (m) return `${applyDpr(Number(m[1]), dpr)}px`;
+  }
+  return token.value;
+}
+
 program
   .command("extract")
   .argument("[imagePath]", "Path to the reference screenshot")
@@ -71,6 +88,7 @@ program
   .option("--label", "Enable semantic node labeling (heuristic; provide adapter for LLM)", false)
   .option("--overlay", "Include structured overlay annotations for LLM vision cross-referencing", false)
   .option("--fine", "Use fine-grained (4px) layout detection for small details", false)
+  .option("--dpr <n>", "Device pixel ratio of the screenshot (e.g. 2 for a Retina/Mac capture). Auto-detected when omitted; pass it to report measurements in CSS pixels.")
   .action(async (imagePath, options) => {
     const resolvedImagePath = imagePath ?? options.image;
     if (!resolvedImagePath) {
@@ -82,7 +100,8 @@ program
       disableOcr: options.ocr === false,
       enableLabeling: options.label,
       enableOverlay: options.overlay,
-      fineGrid: options.fine
+      fineGrid: options.fine,
+      dpr: parseDprOption(options.dpr)
     });
 
     if (options.json && options.compact) {
@@ -101,6 +120,11 @@ program
       // Compact text output
       const compact = buildCompactExtract(report);
       console.log(`Image: ${compact.image.width}x${compact.image.height}`);
+      if (compact.scale && compact.scale.dpr > 1) {
+        console.log(`Scale: ${compact.scale.dpr}x (${compact.scale.source}) — measurements below are CSS px (${compact.image.cssWidth}x${compact.image.cssHeight})`);
+      } else if (compact.scale?.scaleHint) {
+        console.log(`Scale: ${compact.scale.scaleHint}`);
+      }
       console.log(`Background: ${compact.background}`);
       console.log(`\nColors (${compact.colors.length}):`);
       for (const c of compact.colors) {
@@ -537,18 +561,21 @@ program
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
   .option("--no-ocr", "Disable OCR text extraction")
+  .option("--dpr <n>", "Device pixel ratio of the screenshot (e.g. 2 for Retina). Auto-detected when omitted; pass it to get CSS-pixel token values.")
   .action(async (imagePath, options) => {
     assertInputExists("image_path", imagePath);
     const report = await extractImageReport(imagePath, {
-      disableOcr: options.ocr === false
+      disableOcr: options.ocr === false,
+      dpr: parseDprOption(options.dpr)
     });
-    const tokens = generateDesignTokens(report);
+    const dpr = report.scale?.dpr ?? 1;
+    const tokens = generateDesignTokens(report).map((t) => ({ ...t, value: normalizeTokenValue(t, dpr) }));
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, tokens }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, scale: report.scale, tokens }, null, 2));
       return;
     }
 
-    console.log(`Generated ${tokens.length} design tokens from ${report.image.path}`);
+    console.log(`Generated ${tokens.length} design tokens from ${report.image.path}${dpr > 1 ? ` (CSS px @ ${dpr}x)` : ""}`);
     for (const token of tokens) {
       console.log(`  ${token.name}: ${token.value} (used ${token.count}x)`);
     }
@@ -559,14 +586,16 @@ program
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
   .option("--no-ocr", "Disable OCR text extraction")
+  .option("--dpr <n>", "Device pixel ratio of the screenshot (e.g. 2 for Retina). Auto-detected when omitted.")
   .action(async (imagePath, options) => {
     assertInputExists("image_path", imagePath);
     const report = await extractImageReport(imagePath, {
-      disableOcr: options.ocr === false
+      disableOcr: options.ocr === false,
+      dpr: parseDprOption(options.dpr)
     });
 
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, implementationPlan: report.implementationPlan }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, scale: report.scale, implementationPlan: report.implementationPlan }, null, 2));
       return;
     }
 
@@ -1618,6 +1647,8 @@ interface ExtractOptions {
   enableLabeling?: boolean;
   enableOverlay?: boolean;
   fineGrid?: boolean;
+  /** Explicit device pixel ratio of the screenshot; auto-detected when omitted. */
+  dpr?: number;
 }
 
 interface SessionEntry {
@@ -1631,6 +1662,7 @@ interface SessionEntry {
 async function extractImageReport(imagePath: string, options?: ExtractOptions) {
   const normalizedPath = resolve(imagePath);
   const image = await loadImage(normalizedPath);
+  const scale = resolveDpr(options?.dpr, estimateDpr(image));
   const backgroundHex = detectBackgroundColor(image);
   const rawNodes = options?.fineGrid ? detectLayoutBoxesFine(image) : detectLayoutBoxes(image);
   const layout = enrichLayoutNodes(image, rawNodes, backgroundHex);
@@ -1646,6 +1678,7 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
       channels: image.channels,
       trimmedBounds: image.trimmedBounds
     },
+    scale,
     colors: extractDominantColors(image),
     layout: clustered.nodes,
     text: await extractText(normalizedPath, { disableOcr: options?.disableOcr }),
@@ -1689,13 +1722,18 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
 }
 
 function buildCompactExtract(report: any) {
+  // All geometry below is reported in CSS pixels: raw image px divided by the resolved
+  // device pixel ratio (1 = unchanged). This is the fix for "fonts/spacing/sizing off" —
+  // a 2x screenshot's 70px heading is reported as 35px, not 70px.
+  const dpr = report.scale?.dpr ?? 1;
+
   // Dominant colors (max 8)
   const colors = (report.colors ?? []).slice(0, 8).map((c: any) => ({
     hex: c.hex,
     frequency: c.frequency ?? c.ratio ?? 0
   }));
 
-  // Font sizes sorted by frequency
+  // Font sizes sorted by frequency (normalized to CSS px)
   const fontSizeMap = new Map<number, number>();
   for (const text of report.text ?? []) {
     const fs = text.typography?.fontSize;
@@ -1703,7 +1741,7 @@ function buildCompactExtract(report: any) {
   }
   const fontSizes = [...fontSizeMap.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([size, count]) => ({ size, count }));
+    .map(([size, count]) => ({ size: applyDpr(size, dpr), count }));
 
   // Semantic anchors as regions with roles and text previews
   const anchors = report.semanticAnchors ?? [];
@@ -1722,10 +1760,10 @@ function buildCompactExtract(report: any) {
       .join("; ") || undefined;
     return {
       role: a.role ?? a.name ?? "section",
-      x: a.bounds.x,
-      y: a.bounds.y,
-      width: a.bounds.width,
-      height: a.bounds.height,
+      x: applyDpr(a.bounds.x, dpr),
+      y: applyDpr(a.bounds.y, dpr),
+      width: applyDpr(a.bounds.width, dpr),
+      height: applyDpr(a.bounds.height, dpr),
       textPreview
     };
   });
@@ -1747,10 +1785,10 @@ function buildCompactExtract(report: any) {
         .join("; ") || undefined;
       regions.push({
         role: "block",
-        x: node.bounds.x,
-        y: node.bounds.y,
-        width: node.bounds.width,
-        height: node.bounds.height,
+        x: applyDpr(node.bounds.x, dpr),
+        y: applyDpr(node.bounds.y, dpr),
+        width: applyDpr(node.bounds.width, dpr),
+        height: applyDpr(node.bounds.height, dpr),
         textPreview
       });
     }
@@ -1771,17 +1809,24 @@ function buildCompactExtract(report: any) {
     .slice(0, 60)
     .map((t: any) => ({
       text: t.text,
-      x: t.bounds?.x ?? 0,
-      y: t.bounds?.y ?? 0,
-      width: t.bounds?.width ?? 0,
-      height: t.bounds?.height ?? 0,
-      fontSize: t.typography?.fontSize ?? null,
+      x: applyDpr(t.bounds?.x ?? 0, dpr),
+      y: applyDpr(t.bounds?.y ?? 0, dpr),
+      width: applyDpr(t.bounds?.width ?? 0, dpr),
+      height: applyDpr(t.bounds?.height ?? 0, dpr),
+      fontSize: t.typography?.fontSize != null ? applyDpr(t.typography.fontSize, dpr) : null,
       fontWeight: t.typography?.fontWeight ?? null,
       confidence: Number((t.confidence ?? 0).toFixed(2))
     }));
 
   return {
-    image: { width: report.image.width, height: report.image.height },
+    image: {
+      width: report.image.width,
+      height: report.image.height,
+      cssWidth: applyDpr(report.image.width, dpr),
+      cssHeight: applyDpr(report.image.height, dpr)
+    },
+    scale: report.scale,
+    units: dpr === 1 ? "image-px" : "css-px",
     background: report.diagnostics?.background ?? colors[0]?.hex ?? "#ffffff",
     colors,
     fontSizes,

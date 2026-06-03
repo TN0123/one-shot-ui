@@ -70,6 +70,23 @@ describe("tool arg building", () => {
     ]);
   });
 
+  it("maps dpr to --dpr on extract and tokens", () => {
+    expect(byName("extract").build({ image_path: "/a.png", dpr: 2 }).cliArgs).toEqual([
+      "extract",
+      "/a.png",
+      "--json",
+      "--dpr",
+      "2",
+    ]);
+    expect(byName("tokens").build({ image_path: "/a.png", dpr: 2 }).cliArgs).toEqual([
+      "tokens",
+      "/a.png",
+      "--json",
+      "--dpr",
+      "2",
+    ]);
+  });
+
   it("tokens and plan are single-image commands", () => {
     expect(byName("tokens").build({ image_path: "/a.png" }).cliArgs).toEqual([
       "tokens",

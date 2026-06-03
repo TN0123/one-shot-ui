@@ -1,6 +1,8 @@
 import sharp from "sharp";
 import type { Bounds, ImageMeta } from "@one-shot-ui/core";
 
+export * from "./dpr.js";
+
 export type ImageAsset = ImageMeta & {
   data: Uint8ClampedArray;
 };
