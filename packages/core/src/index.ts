@@ -86,6 +86,7 @@ export const textBlockSchema = z.object({
         .enum(["left", "center", "right", "justify"])
         .nullable()
         .optional(),
+      monospace: z.boolean().optional(),
       fontFamilyCandidates: z.array(fontFamilyCandidateSchema).optional(),
       confidence: z.number().min(0).max(1),
     })

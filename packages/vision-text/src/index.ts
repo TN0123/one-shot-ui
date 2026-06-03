@@ -1,6 +1,7 @@
 import type { FontFamilyCandidate, TextBlock } from "@one-shot-ui/core";
 import { loadImage, samplePixel } from "@one-shot-ui/image-io";
 import { preprocessForOcr } from "./preprocess.js";
+import { detectMonospace } from "./font-style.js";
 import { unlink } from "node:fs/promises";
 
 export interface ExtractTextOptions {
@@ -103,6 +104,7 @@ function estimateTypography(
   const averageGlyphWidth = bounds.width / Math.max(1, Math.round(bounds.width / Math.max(fontSize * 0.48, 1)));
   const letterSpacing = Math.round((averageGlyphWidth - fontSize * 0.52) * 10) / 10;
   const textAlignment = detectTextAlignment(bounds);
+  const mono = detectMonospace(columnInkActivity(image, bounds));
 
   return {
     fontSize,
@@ -110,9 +112,32 @@ function estimateTypography(
     lineHeight,
     letterSpacing,
     textAlignment,
-    fontFamilyCandidates: rankFontFamilies(fontSize, fontWeight, letterSpacing, foregroundRatio),
+    monospace: mono.monospace,
+    fontFamilyCandidates: rankFontFamilies(fontSize, fontWeight, letterSpacing, foregroundRatio, mono.monospace),
     confidence: 0.35 + Math.min(0.4, foregroundRatio) + (measuredHeight > 4 ? 0.1 : 0)
   };
+}
+
+/** Per-column boolean: true where the region's column contains text ink. */
+function columnInkActivity(
+  image: Awaited<ReturnType<typeof loadImage>>,
+  bounds: { x: number; y: number; width: number; height: number }
+): boolean[] {
+  const background = averageCornerRgb(image, bounds);
+  const threshold = 54;
+  const stepY = Math.max(1, Math.floor(bounds.height / 12));
+  const activity: boolean[] = [];
+  for (let x = 0; x < bounds.width; x++) {
+    let ink = false;
+    for (let y = 0; y < bounds.height; y += stepY) {
+      const [r, g, b, a] = samplePixel(image, bounds.x + x, bounds.y + y);
+      if (a < 16) continue;
+      const dist = Math.abs(r - background.r) + Math.abs(g - background.g) + Math.abs(b - background.b);
+      if (dist > threshold) { ink = true; break; }
+    }
+    activity.push(ink);
+  }
+  return activity;
 }
 
 function estimateForegroundRatio(
@@ -315,14 +340,25 @@ function rankFontFamilies(
   fontSize: number,
   fontWeight: number,
   letterSpacing: number,
-  foregroundRatio: number
+  foregroundRatio: number,
+  monospace = false
 ): FontFamilyCandidate[] {
   const observedWidthRatio = 0.52 + letterSpacing * 0.01;
 
   const scored = FONT_DATABASE.map((font) => {
     let score = 0;
 
-    // Width ratio match (most differentiating signal from pixels)
+    // Measured monospace signal dominates: it is the one family trait we detect from
+    // pixels reliably, so honor it strongly rather than letting weak priors override it.
+    if (monospace) {
+      if (font.category === "monospace") score += 0.5;
+      else score -= 0.4;
+    } else if (font.category === "monospace") {
+      // Not monospaced — don't suggest a mono face.
+      score -= 0.4;
+    }
+
+    // Width ratio match (most differentiating non-mono signal from pixels)
     const widthDelta = Math.abs(font.widthRatio - observedWidthRatio);
     score += Math.max(0, 1 - widthDelta * 10) * 0.35;
 
@@ -338,17 +374,20 @@ function rankFontFamilies(
     const inRange = fontSize >= font.commonSizes[0] && fontSize <= font.commonSizes[1];
     score += (inRange ? 1 : 0.3) * 0.15;
 
-    // Category prior: sans-serif is the most common in UI
-    if (font.category === "sans-serif") score += 0.15;
-    else if (font.category === "monospace" && foregroundRatio > 0.3) score += 0.1;
-    else if (font.category === "serif") score += 0.05;
-    else score += 0.08;
+    // Category prior: sans-serif is the most common in UI (skip when monospaced).
+    if (!monospace) {
+      if (font.category === "sans-serif") score += 0.15;
+      else if (font.category === "serif") score += 0.05;
+      else if (font.category === "display") score += 0.08;
+    }
 
     // Popularity prior (top fonts get a small boost)
-    const popularFonts = ["Inter", "SF Pro Display", "Roboto", "Helvetica Neue", "Geist"];
+    const popularFonts = monospace
+      ? ["JetBrains Mono", "Fira Code", "SF Mono", "IBM Plex Mono", "Source Code Pro"]
+      : ["Inter", "SF Pro Display", "Roboto", "Helvetica Neue", "Geist"];
     if (popularFonts.includes(font.family)) score += 0.1;
 
-    return { family: font.family, confidence: Math.round(Math.min(0.95, score) * 100) / 100 };
+    return { family: font.family, confidence: Math.round(Math.min(0.95, Math.max(0, score)) * 100) / 100 };
   });
 
   return scored

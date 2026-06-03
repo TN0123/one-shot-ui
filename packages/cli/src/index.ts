@@ -1815,8 +1815,15 @@ function buildCompactExtract(report: any) {
       height: applyDpr(t.bounds?.height ?? 0, dpr),
       fontSize: t.typography?.fontSize != null ? applyDpr(t.typography.fontSize, dpr) : null,
       fontWeight: t.typography?.fontWeight ?? null,
+      monospace: t.typography?.monospace ?? false,
       confidence: Number((t.confidence ?? 0).toFixed(2))
     }));
+
+  const anyMono = (report.text ?? []).some((t: any) => t.typography?.monospace);
+  const typographyNote =
+    "Font sizes/weights and monospace-vs-proportional are measured from pixels; " +
+    "serif-vs-sans-serif and the exact typeface are best-guess candidates — confirm against the screenshot." +
+    (anyMono ? " Monospaced text detected; prefer a monospace family for those blocks." : "");
 
   return {
     image: {
@@ -1827,6 +1834,7 @@ function buildCompactExtract(report: any) {
     },
     scale: report.scale,
     units: dpr === 1 ? "image-px" : "css-px",
+    typographyNote,
     background: report.diagnostics?.background ?? colors[0]?.hex ?? "#ffffff",
     colors,
     fontSizes,
