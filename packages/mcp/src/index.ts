@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { existsSync } from "node:fs";
 import { runCli, parseCliJson } from "./cli-runner.js";
-import { TOOLS, REQUIRED_FILE_ARGS } from "./tools.js";
+import { TOOLS, validateRequiredFiles } from "./tools.js";
 
 // Replaced at build time via --define; falls back for `bun src/index.ts`.
 const VERSION = process.env.npm_package_version ?? "0.0.0-dev";
@@ -22,19 +22,12 @@ async function main(): Promise<void> {
       },
       async (args: Record<string, unknown>) => {
         // Validate file inputs up front for a clean, agent-friendly error.
-        for (const key of REQUIRED_FILE_ARGS) {
-          const value = args[key];
-          if (typeof value === "string" && !existsSync(value)) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text" as const,
-                  text: `File not found for "${key}": ${value}. Pass an absolute path to an existing image.`,
-                },
-              ],
-            };
-          }
+        const fileError = validateRequiredFiles(args, existsSync);
+        if (fileError) {
+          return {
+            isError: true,
+            content: [{ type: "text" as const, text: fileError }],
+          };
         }
 
         try {

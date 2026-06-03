@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const VERSION = process.env.npm_package_version ?? "0.0.0-dev";
 
+export { isLikelyScreenshotTempPath, describeMissingImagePath } from "./screenshot-path.js";
+
 export const boundsSchema = z.object({
   x: z.number().nonnegative(),
   y: z.number().nonnegative(),
@@ -361,6 +363,18 @@ export const compareReportSchema = z.object({
       })
       .optional(),
     hierarchyScore: z.number().min(0).max(100).optional(),
+    verdict: z
+      .object({
+        status: z.enum(["converged", "not-converged"]),
+        reasons: z.array(z.string()),
+        completeness: z.object({
+          nodeCoverage: z.number().min(0).nullable(),
+          refNodeCount: z.number().int().nonnegative(),
+          builtNodeCount: z.number().int().nonnegative(),
+          hierarchyScore: z.number().min(0).max(100),
+        }),
+      })
+      .optional(),
     gridBreakdown: z
       .array(
         z.object({

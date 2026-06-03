@@ -18,10 +18,18 @@ import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText, type ExtractTextOptions } from "@one-shot-ui/vision-text";
 import { segmentMismatch } from "./segmented-mismatch.js";
+import { assessConvergence } from "./convergence.js";
 import { detectLayoutCollapse } from "./layout-collapse.js";
 import { collapseReflowCascade } from "./reflow.js";
 import { keepIssueByContribution } from "./issue-filter.js";
 import { isMeaningfulRecolor } from "./recolor.js";
+
+export {
+  assessConvergence,
+  CONVERGENCE_THRESHOLDS,
+  type ConvergenceAssessment,
+  type ConvergenceInput,
+} from "./convergence.js";
 
 export interface CompareImagesOptions {
   heatmapPath?: string;
@@ -434,6 +442,16 @@ export async function compareImages(
     referenceLayout, implementationLayout
   );
 
+  // Turn the pixel/structure signals into a single agent-actionable verdict so a
+  // misleadingly low mismatch ratio doesn't read as "done" (see ./convergence.ts).
+  const verdict = assessConvergence({
+    adjustedMismatch: mismatchRatio,
+    hierarchyScore,
+    refNodeCount: referenceLayout.length,
+    builtNodeCount: implementationLayout.length,
+    topRegionContribution: gridBreakdown[0]?.contribution,
+  });
+
   return compareReportSchema.parse({
     version: VERSION,
     referenceImage,
@@ -461,6 +479,7 @@ export async function compareImages(
         irreducibleEstimate: clampedIrreducible,
       },
       hierarchyScore,
+      verdict,
       gridBreakdown: gridBreakdown.length > 0 ? gridBreakdown : undefined,
       verticalShift: verticalShift.confidence > 0 ? verticalShift : undefined,
     },

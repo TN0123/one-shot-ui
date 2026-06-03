@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TOOLS, REQUIRED_FILE_ARGS } from "./tools.js";
+import { TOOLS, REQUIRED_FILE_ARGS, validateRequiredFiles } from "./tools.js";
 
 function byName(name: string) {
   const tool = TOOLS.find((t) => t.name === name);
@@ -100,5 +100,34 @@ describe("tool arg building", () => {
       "implementation_path",
       "reference_path",
     ]);
+  });
+});
+
+describe("validateRequiredFiles", () => {
+  it("returns null when all present required files exist", () => {
+    const err = validateRequiredFiles(
+      { reference_path: "/a.png", implementation_path: "/b.png" },
+      () => true
+    );
+    expect(err).toBeNull();
+  });
+
+  it("returns macOS screenshot guidance for a missing temp path", () => {
+    const err = validateRequiredFiles(
+      { image_path: "/var/folders/x/T/TemporaryItems/NSIRD_screencaptureui_z/Screenshot 1.png" },
+      () => false
+    );
+    expect(err).toContain("image_path");
+    expect(err).toMatch(/Desktop/);
+  });
+
+  it("returns a generic message for an ordinary missing file", () => {
+    const err = validateRequiredFiles({ reference_path: "/proj/ref.png" }, () => false);
+    expect(err).toContain("reference_path");
+    expect(err).toMatch(/absolute path/i);
+  });
+
+  it("ignores non-string and absent args", () => {
+    expect(validateRequiredFiles({ top: 5 }, () => false)).toBeNull();
   });
 });

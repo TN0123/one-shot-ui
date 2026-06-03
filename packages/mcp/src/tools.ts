@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { describeMissingImagePath } from "@one-shot-ui/core";
 
 export interface ToolSpec {
   name: string;
@@ -158,3 +159,22 @@ export const TOOLS: ToolSpec[] = [compare, extract, suggestFixes, tokens, plan];
 
 /** Tool args whose values must point at an existing file before the CLI is spawned. */
 export const REQUIRED_FILE_ARGS = new Set(["reference_path", "implementation_path", "image_path"]);
+
+/**
+ * Validate that every required file arg present in `args` points at an existing file,
+ * per the injected `fileExists` predicate. Returns an agent-friendly error message for
+ * the first missing one (with macOS screenshot-temp-path guidance when applicable), or
+ * null when all present required files exist. Dependency-injected for testability.
+ */
+export function validateRequiredFiles(
+  args: Record<string, unknown>,
+  fileExists: (p: string) => boolean
+): string | null {
+  for (const key of REQUIRED_FILE_ARGS) {
+    const value = args[key];
+    if (typeof value === "string" && !fileExists(value)) {
+      return describeMissingImagePath(key, value);
+    }
+  }
+  return null;
+}

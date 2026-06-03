@@ -21,6 +21,7 @@ import {
   benchmarkSuiteReportSchema,
   buildImplementationPlan,
   buildSemanticAnchors,
+  describeMissingImagePath,
   extractReportSchema,
   type BenchmarkCaseResult,
   type BenchmarkRegionResult,
@@ -42,6 +43,23 @@ import { resolveFixTarget, inferCssCategory } from "./fix-target.js";
 const program = new Command();
 program.name("one-shot-ui").description("Deterministic UI extraction and diff toolkit").version(VERSION);
 
+const HTML_EXTS = [".html", ".htm"];
+function isHtmlInput(p: string): boolean {
+  return HTML_EXTS.some((ext) => p.toLowerCase().endsWith(ext));
+}
+
+/**
+ * Fail fast with an agent-friendly message when an image input does not exist,
+ * instead of letting sharp throw a raw stack trace. Recognizes macOS screenshot
+ * temp paths that have already been moved to ~/Desktop.
+ */
+function assertInputExists(label: string, p: string): void {
+  if (!existsSync(p)) {
+    console.error(describeMissingImagePath(label, p));
+    process.exit(1);
+  }
+}
+
 program
   .command("extract")
   .argument("[imagePath]", "Path to the reference screenshot")
@@ -59,6 +77,7 @@ program
       console.error("Error: missing image path. Usage:\n  one-shot-ui extract <imagePath>\n  one-shot-ui extract --image <path>");
       process.exit(1);
     }
+    assertInputExists("image_path", resolvedImagePath);
     const report = await extractImageReport(resolvedImagePath, {
       disableOcr: options.ocr === false,
       enableLabeling: options.label,
@@ -160,6 +179,11 @@ Examples:
       console.error("   or: one-shot-ui compare --reference reference.png --implementation implementation.png");
       process.exit(1);
     }
+
+    // Fail fast with an agent-friendly message for missing image inputs (HTML inputs
+    // are captured below, so let those fall through to the capture step).
+    if (!isHtmlInput(resolvedRefPath)) assertInputExists("reference_path", resolvedRefPath);
+    if (!isHtmlInput(resolvedImplPath)) assertInputExists("implementation_path", resolvedImplPath);
 
     // Auto-capture HTML/HTM files to screenshots before comparing
     const htmlExts = [".html", ".htm"];
@@ -301,7 +325,15 @@ Examples:
       const adjustedTag = Math.abs(adjustedMismatch - rawMismatch) > 0.005
         ? ` (raw: ${(rawMismatch * 100).toFixed(1)}%, adjusted for low structural complexity)`
         : "";
-      let summaryLine = `Mismatch: ${ratio}%${adjustedTag} | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`;
+      // Lead with the convergence verdict so a low pixel % can't read as "done".
+      const verdict = report.summary.verdict;
+      let summaryLine = "";
+      if (verdict) {
+        summaryLine = `VERDICT: ${verdict.status === "converged" ? "CONVERGED" : "NOT CONVERGED"}`;
+        if (verdict.reasons.length) summaryLine += ` — ${verdict.reasons.join("; ")}`;
+        summaryLine += " | ";
+      }
+      summaryLine += `Mismatch: ${ratio}%${adjustedTag} | Dimensions: ${dimStatus}${segInfo} | Top issues: ${topIssues || "none"}`;
       if (hierarchyScore < 50) {
         summaryLine += ` | Warning: Low visual hierarchy score (${hierarchyScore}/100) — implementation may be missing structural content.`;
       }
@@ -506,6 +538,7 @@ program
   .option("--json", "Print full JSON report", false)
   .option("--no-ocr", "Disable OCR text extraction")
   .action(async (imagePath, options) => {
+    assertInputExists("image_path", imagePath);
     const report = await extractImageReport(imagePath, {
       disableOcr: options.ocr === false
     });
@@ -527,6 +560,7 @@ program
   .option("--json", "Print full JSON report", false)
   .option("--no-ocr", "Disable OCR text extraction")
   .action(async (imagePath, options) => {
+    assertInputExists("image_path", imagePath);
     const report = await extractImageReport(imagePath, {
       disableOcr: options.ocr === false
     });
@@ -1090,6 +1124,8 @@ program
   .option("--pass <n>", "Current pass number — guards against premature convergence declaration", "1")
   .option("--session-dir <dir>", "Directory to persist per-pass issue lists for escalation detection")
   .action(async (referencePath, implementationPath, options) => {
+    if (!isHtmlInput(referencePath)) assertInputExists("reference_path", referencePath);
+    if (!isHtmlInput(implementationPath)) assertInputExists("implementation_path", implementationPath);
     const compareOpts: CompareImagesOptions = {
       top: Number.parseInt(options.top, 10),
       disableOcr: options.ocr === false,
