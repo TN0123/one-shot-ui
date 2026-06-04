@@ -20,10 +20,12 @@ const compare: ToolSpec = {
   title: "Compare a build against a reference screenshot",
   description:
     "Deterministically diff an implementation screenshot against a reference screenshot. Returns a " +
-    "pixel-mismatch ratio, width/height deltas, and a ranked list of structural issues (missing/extra " +
-    "elements, position, size, color, shadow, spacing), plus an irreducible-mismatch floor so you know " +
-    "when further pixel-chasing is futile. Inputs are image file paths (PNG/JPG); the same inputs always " +
-    "produce the same numbers.",
+    "pixel-mismatch ratio, width/height deltas, a ranked list of structural issues (missing/extra " +
+    "elements, position, size, color, shadow, spacing), an irreducible-mismatch floor so you know " +
+    "when further pixel-chasing is futile, AND a `spacing[]` array of high-trust, directly-CSS-able " +
+    "sizing/spacing deltas (top-bar/band heights, content-column left edges, gutter widths) measured by " +
+    "pixel projection — use these to close sizing/spacing gaps exactly. Inputs are image file paths " +
+    "(PNG/JPG); the same inputs always produce the same numbers.",
   inputSchema: {
     reference_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the reference (design) screenshot."),
     implementation_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the current build screenshot."),
@@ -60,7 +62,9 @@ const extract: ToolSpec = {
   title: "Extract structured design data from a screenshot",
   description:
     "Analyze a single reference screenshot into structured data an agent can build from: layout regions " +
-    "(position/size), dominant colors, typography, spacing, and a suggested implementation strategy. " +
+    "(position/size), dominant colors, typography, spacing, a suggested implementation strategy, and a " +
+    "`rulers` block of deterministic projection measurements (background-zone band heights, content-column " +
+    "edges + widths, gutter widths) — build to these exact values to get sizing/spacing right the first time. " +
     "Returns a compact summary by default; set full=true for the complete report. Input is an image file path.",
   inputSchema: {
     image_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the screenshot to analyze."),

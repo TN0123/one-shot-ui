@@ -1,6 +1,6 @@
 {
   "name": "one-shot-ui",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Deterministic UI extraction and diffing from screenshots",
   "type": "module",
   "mcpName": "io.github.TN0123/one-shot-ui",

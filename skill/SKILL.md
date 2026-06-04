@@ -38,9 +38,41 @@ Use the extracted data to write the implementation directly. Set exact:
 - Typography (font sizes, weights from text blocks)
 - Border radii, shadows, gradients (from style extraction)
 
+**Build to the `rulers` block — this is the single biggest lever for sizing/spacing.**
+`extract` reports deterministic pixel-projection "rulers" so you don't have to eyeball or
+hand-measure geometry:
+- `rulers.bands` — background-zone heights down the page (e.g. a top header/nav bar's exact
+  height in CSS px, with its background hex). Set those container heights/paddings exactly.
+- `rulers.columns` — content column left edges and widths (sidebar width, main column,
+  card columns). Drive your container widths / grid tracks from these.
+- `rulers.gutters` — the exact gaps between columns. Use them for `column-gap`, margins, padding.
+These are CSS px (DPR already applied). Matching them up front avoids the slow "off by ~16px,
+shifted right" iteration loop.
+
+**Icons: do not hand-draw glyphs.** Reproducing icons as inline SVG paths or CSS shapes
+almost never pixel-matches and is the most common residual diff. Instead use an icon library:
+- Match the icon set the user's codebase already uses if there is one.
+- Otherwise default to **lucide** (`lucide-react`, or the framework-appropriate package).
+- For a GitHub-style UI specifically, GitHub uses **Octicons** (`@primer/octicons`).
+Pick the closest-matching icon by name and size it to the reference (commonly 16–20px).
+
 ### Step 3: Compare
-Run `one-shot-ui capture --url http://localhost:3000 --output impl.png` then
-`one-shot-ui compare <reference.png> impl.png --json --heatmap heatmap.png`.
+Capture your build at the reference's exact scale, then diff:
+```
+one-shot-ui capture --file ./index.html --match-reference reference.png --output impl.png
+one-shot-ui compare reference.png impl.png --json --heatmap heatmap.png
+```
+`--match-reference` now matches BOTH the viewport and the device scale: a 2x Retina reference
+is captured at CSS dimensions @ 2x so the pixel sizes line up and no resize/crop is needed.
+If the reference is a Retina/Mac screenshot and auto-detection isn't confident, pass
+`--reference-dpr 2` (the capture prints its detected DPR + a hint when unsure).
+
+**For sizing/spacing, read `spacing[]` (or run `compare --spacing`).** Every `compare`
+reports a `spacing[]` array of deterministic, directly-CSS-able deltas — `BAND_HEIGHT_DELTA`
+(a bar/section is N px too tall/short), `EDGE_X_DELTA` (a column's left edge is N px off),
+`GUTTER_DELTA` (a gap is N px too wide/narrow) — each with a concrete fix like
+"Reduce its height/padding by 11px." These are the highest-trust fixes; apply them first.
+`one-shot-ui compare reference.png impl.png --spacing` prints just this list.
 
 Read the heatmap to see where differences are. The JSON report includes:
 - `summary.verdict` — `{ status: "converged" | "not-converged", reasons[], completeness }`.

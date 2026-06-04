@@ -19,15 +19,26 @@ wrong with a UI implementation compared to a reference screenshot.
 
 2. **Build** — Use the extracted data (colors, spacing, typography, tokens) to
    build your implementation. The agent should write the UI code directly.
+   Build to the `rulers` block (band heights, column edges + widths, gutter widths — all
+   CSS px) to get sizing/spacing right the first time. Don't hand-draw icons/glyphs as SVG
+   or CSS — use an icon library (the codebase's existing set, else `lucide`; `@primer/octicons`
+   for GitHub-style UIs). Hand-drawn glyphs are the most common residual diff.
 
-3. **Capture** — Screenshot your implementation:
-       one-shot-ui capture --url http://localhost:3000 --output impl.png
+3. **Capture** — Screenshot your implementation at the reference's exact scale:
+       one-shot-ui capture --file ./index.html --match-reference reference.png --output impl.png
+   `--match-reference` matches viewport AND device scale (a 2x Retina reference is captured
+   at CSS dims @ 2x), so pixels line up without resize/crop. Add `--reference-dpr 2` if the
+   reference is Retina and the capture reports low DPR confidence.
 
 4. **Compare** — Diff reference vs implementation:
        one-shot-ui compare reference.png impl.png --json --heatmap heatmap.png
    Use `summary.verdict` (`converged` / `not-converged` + reasons) as your stop signal —
    not the pixel `mismatchRatio`, which is background-dominated and reads as "almost done"
    even when most elements are missing. Keep iterating until the verdict is `converged`.
+   The report's `spacing[]` array gives deterministic, directly-CSS-able sizing/spacing
+   deltas (`BAND_HEIGHT_DELTA`, `EDGE_X_DELTA`, `GUTTER_DELTA`) with concrete fixes — apply
+   these first; they're the highest-trust path to closing the last-mile spacing gap.
+   `compare … --spacing` prints just this list.
 
 5. **Suggest Fixes** — Get actionable CSS fix suggestions:
        one-shot-ui suggest-fixes reference.png impl.png --json
@@ -46,10 +57,10 @@ wrong with a UI implementation compared to a reference screenshot.
 | Command         | Purpose                                    | Key Flags                          |
 |-----------------|--------------------------------------------|----------------------------------  |
 | extract         | Analyze screenshot into layout/color/text  | --json, --no-ocr, --overlay, --fine|
-| compare         | Pixel + structural diff                    | --json, --heatmap, --dom-diff      |
+| compare         | Pixel + structural diff + spacing deltas   | --json, --heatmap, --spacing, --dom-diff |
 | tokens          | Extract design tokens                      | --json                             |
 | plan            | Generate implementation strategy           | --json                             |
-| capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output            |
+| capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output, --match-reference, --reference-dpr |
 | suggest-fixes   | Tailwind/CSS fix suggestions from diff     | --json, --top, --dom-diff, --framework |
 | run             | Multi-pass refinement loop                 | --impl, --max-passes, --threshold  |
 | serve           | Watch-mode DOM-aware query server          | --ref, --impl, --port              |
@@ -79,6 +90,14 @@ with Zod schemas and follow stable interfaces.
 - **Pass `--dpr 2` for Retina/Mac screenshots** (CLI) or `dpr: 2` (MCP). This is the
   single biggest accuracy win — without it, a 2x screenshot's 35px heading and 8px gaps
   are reported as 70px and 16px, throwing off fonts, spacing, and sizing together.
+- **Close sizing/spacing with `rulers` (extract) and `spacing[]` (compare).** These are
+  deterministic pixel-projection measurements — band/bar heights, content-column edges and
+  widths, gutter widths — reported in CSS px with concrete fixes ("Reduce its height/padding
+  by 11px"). Build to the reference rulers; apply the compare spacing deltas first. This is
+  the fix for the "off by ~16px, shifted right" last mile — no more hand-rolling pixel scripts.
+- **Don't hand-draw icons.** Inline-SVG/CSS glyphs rarely pixel-match and dominate the residual
+  diff. Use an icon library: the codebase's existing set, else `lucide`; `@primer/octicons`
+  for GitHub-style UIs. Match by name, size to the reference (usually 16–20px).
 - **Stop on the verdict, not the percentage.** `compare`/`suggest-fixes` report
   `summary.verdict`; a low `mismatchRatio` with `status: "not-converged"` means you are
   missing structure/content, not done. Iterate until `converged`.

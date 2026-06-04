@@ -30,15 +30,16 @@ import {
 } from "@one-shot-ui/core";
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
 import { captureScreenshot, BlankCaptureError } from "@one-shot-ui/browser-capture";
-import { compareImages, type CompareImagesOptions } from "@one-shot-ui/diff-engine";
+import { compareImages, compareRulers, type CompareImagesOptions, type SpacingIssue } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions, estimateDpr, resolveDpr, applyDpr } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
-import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing } from "@one-shot-ui/vision-layout";
+import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing, measureRulers, type RulerReport } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
 import { labelNodes } from "@one-shot-ui/semantic-label";
 import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
 import { resolveFixTarget, inferCssCategory } from "./fix-target.js";
+import { resolveMatchReferenceViewport } from "./match-reference.js";
 
 const program = new Command();
 program.name("one-shot-ui").description("Deterministic UI extraction and diff toolkit").version(VERSION);
@@ -139,6 +140,13 @@ program
       if (compact.gridStructure) {
         console.log(`Grid: ${compact.gridStructure.columns} columns, ${compact.gridStructure.rows} rows`);
       }
+      if (compact.rulers) {
+        const rl = compact.rulers;
+        console.log(`\nRulers (deterministic projections — build to these exact ${compact.units} values):`);
+        console.log(`  Bands (y-zones): ${rl.bands.map((b: any) => `${b.height}px@${b.background}`).join(" | ")}`);
+        if (rl.columns.length) console.log(`  Columns (x): ${rl.columns.map((c: any) => `${c.x}→${c.x + c.width} (${c.width}px)`).join("  ")}`);
+        if (rl.gutters.length) console.log(`  Gutters: ${rl.gutters.map((g: any) => `${g.width}px`).join(", ")}`);
+      }
       console.log(`\nRegions (${compact.regions.length}):`);
       for (const r of compact.regions) {
         const text = r.textPreview ? ` — "${r.textPreview}"` : "";
@@ -176,6 +184,7 @@ program
   .option("--auto-resize", "Auto-resize the implementation screenshot to match reference dimensions before comparing", false)
   .option("--previous-mismatch <ratios>", "Comma-separated previous mismatch ratios (e.g. '0.15,0.10') for regression/plateau detection")
   .option("--summary", "Print a single human-readable summary line", false)
+  .option("--spacing", "Print only the deterministic sizing/spacing deltas (band heights, column edges, gutters)", false)
   .option("--top-fixes <n>", "Print N highest-impact actionable fixes as plain text", "0")
   .addHelpText("after", `
 Examples:
@@ -267,6 +276,23 @@ Examples:
     };
 
     const report = await compareImages(finalRefPath, effectiveImplPath, compareOpts);
+
+    // Deterministic sizing/spacing deltas from projection rulers (band heights,
+    // content-column edges, gutters). These are the high-trust, directly-CSS-able
+    // measurements an agent otherwise hand-rolls with pixel-projection scripts.
+    let spacingDeltas: SpacingIssue[] = [];
+    try {
+      const refImg = await loadImage(resolve(finalRefPath));
+      const implImg = await loadImage(resolve(effectiveImplPath));
+      const refDpr = estimateDpr(refImg).dpr;
+      spacingDeltas = compareRulers(measureRulers(refImg), measureRulers(implImg), { dpr: refDpr });
+    } catch { /* rulers are best-effort; never block a compare */ }
+    (report as any).spacing = spacingDeltas;
+
+    if (options.spacing) {
+      printSpacingDeltas(spacingDeltas, options.json);
+      return;
+    }
 
     // DOM-level comparison if requested
     if (options.domDiff) {
@@ -385,6 +411,11 @@ Examples:
           summaryLine += ` | VERTICAL_SHIFT: ~${Math.abs(vs.pixelOffset)}px ${direction} — check container heights above the fold`;
         }
       }
+      // Deterministic spacing deltas — lead with the largest, the agent's stop-gap signal.
+      if (spacingDeltas.length) {
+        const top = [...spacingDeltas].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))[0]!;
+        summaryLine += ` | SPACING: ${spacingDeltas.length} delta(s), largest ${top.name} ${top.delta > 0 ? "+" : ""}${top.delta}px`;
+      }
       if (regressionInfo.sessionBestWarning) {
         summaryLine += ` | ${regressionInfo.sessionBestWarning}`;
       } else if (regressionInfo.regressionWarning) {
@@ -456,6 +487,11 @@ Examples:
       if (cmpHierarchy < 50) {
         console.log(`Warning: Low visual hierarchy score (${cmpHierarchy}/100) — implementation may be missing structural content.`);
       }
+    }
+    // Deterministic sizing/spacing deltas — the highest-trust, directly-CSS-able fixes.
+    if (spacingDeltas.length) {
+      console.log(`\nSizing/spacing deltas (${spacingDeltas.length}) — deterministic, build to these exact values:`);
+      for (const d of spacingDeltas.slice(0, 8)) console.log(`  • ${d.suggestedFix}`);
     }
     // Load semantic label map to replace opaque region-N IDs in output
     const compareLabelMap = await loadSemanticLabelMap(resolvedImplPath, finalRefPath);
@@ -1407,7 +1443,8 @@ program
   .option("--width <width>", "Viewport width", "1440")
   .option("--height <height>", "Viewport height", "1024")
   .option("--scale <scale>", "Device scale factor", "1")
-  .option("--match-reference <path>", "Auto-detect viewport dimensions from a reference image")
+  .option("--match-reference <path>", "Match the viewport + device scale to a reference image")
+  .option("--reference-dpr <n>", "DPR of the --match-reference image (overrides auto-detection)")
   .option("--skip-blank-check", "Skip the blank-capture validation heuristic", false)
   .option("--json", "Print full JSON report", false)
   .action(async (options) => {
@@ -1415,18 +1452,38 @@ program
     const outputPath = resolve(options.output);
     await mkdir(dirname(outputPath), { recursive: true });
 
-    // Auto-detect dimensions from reference image if --match-reference is provided
+    // Match viewport + device scale to a reference image if --match-reference is provided.
+    // Critically, a 2x Retina reference must be captured at CSS dimensions (raw / dpr) with
+    // deviceScaleFactor = dpr, so the capture's pixel size equals the reference's and
+    // `compare` aligns without resizing/cropping. Capturing at raw px @ 1x (the old bug)
+    // rendered everything double-size.
     let captureWidth = Number.parseInt(options.width, 10);
     let captureHeight = Number.parseInt(options.height, 10);
+    let captureScale = Number.parseFloat(options.scale);
+    let matchRefRawDims: { width: number; height: number } | undefined;
     if (options.matchReference) {
       try {
-        const refDims = await readImageDimensions(resolve(options.matchReference));
-        captureWidth = refDims.width;
-        captureHeight = refDims.height;
-        console.error(`Auto-matched viewport to reference: ${captureWidth}x${captureHeight}`);
+        const refImage = await loadImage(resolve(options.matchReference));
+        matchRefRawDims = { width: refImage.width, height: refImage.height };
+        const explicitDpr = options.referenceDpr ? Number.parseFloat(options.referenceDpr) : undefined;
+        const estimate = estimateDpr(refImage);
+        const vp = resolveMatchReferenceViewport({
+          rawWidth: refImage.width,
+          rawHeight: refImage.height,
+          estimatedDpr: estimate.dpr,
+          explicitDpr
+        });
+        captureWidth = vp.width;
+        captureHeight = vp.height;
+        captureScale = vp.scale;
+        const dprSrc = explicitDpr ? "explicit" : `auto, ${(estimate.confidence * 100).toFixed(0)}% conf`;
+        console.error(`Auto-matched viewport to reference: ${captureWidth}x${captureHeight} @ ${captureScale}x (${refImage.width}x${refImage.height} raw, dpr ${vp.dpr} — ${dprSrc})`);
+        if (!explicitDpr && estimate.confidence < 0.85) {
+          console.error(`  DPR is a guess — pass --reference-dpr 2 if the reference is a Retina/Mac screenshot.`);
+        }
       } catch (err) {
-        console.error(`Warning: Could not read reference dimensions from ${options.matchReference}: ${err instanceof Error ? err.message : String(err)}`);
-        console.error(`Falling back to --width ${captureWidth} --height ${captureHeight}`);
+        console.error(`Warning: Could not read reference from ${options.matchReference}: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`Falling back to --width ${captureWidth} --height ${captureHeight} --scale ${captureScale}`);
       }
     }
 
@@ -1448,9 +1505,24 @@ program
       outputPath,
       width: captureWidth,
       height: captureHeight,
-      deviceScaleFactor: Number.parseFloat(options.scale),
+      deviceScaleFactor: captureScale,
       skipBlankCheck: options.skipBlankCheck
     });
+
+    // Footgun guard: --match-reference matches the viewport WIDTH, but a full-page
+    // capture grows to fit content height. If the build renders taller (or shorter)
+    // than the reference, every pixel diff below the overflow point is offset — warn
+    // loudly so the agent fixes the height before trusting a compare.
+    if (matchRefRawDims) {
+      try {
+        const outDims = await readImageDimensions(outputPath);
+        const dh = outDims.height - matchRefRawDims.height;
+        if (Math.abs(dh) > Math.max(2 * captureScale, 4)) {
+          const cssDelta = Math.round(dh / captureScale);
+          console.error(`⚠ Captured height ${outDims.height}px ≠ reference ${matchRefRawDims.height}px (${cssDelta > 0 ? "+" : ""}${cssDelta} CSS px). Your build is ${cssDelta > 0 ? "taller" : "shorter"} than the reference — the pixel diff below the overflow will be misaligned. Fix the content height (or crop to match) before trusting compare.`);
+        }
+      } catch { /* dimension read is best-effort */ }
+    }
 
     // Clean up temporary HTML wrapper
     if (tmpHtmlPath) {
@@ -1718,7 +1790,40 @@ async function extractImageReport(imagePath: string, options?: ExtractOptions) {
     report = { ...report, annotations };
   }
 
-  return extractReportSchema.parse(report);
+  // Deterministic projection "rulers": background-zone band heights + content
+  // columns/gutters in raw px (CLI applies DPR for display). These give an agent the
+  // exact geometry it would otherwise hand-roll with pixel-projection scripts.
+  const rulers = measureRulers(image);
+  return { ...extractReportSchema.parse(report), rulers };
+}
+
+/** Focused output for `compare --spacing`: just the deterministic spacing deltas. */
+function printSpacingDeltas(deltas: SpacingIssue[], json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify({ spacing: deltas }, null, 2));
+    return;
+  }
+  if (!deltas.length) {
+    console.log("SPACING: no deltas above tolerance — bands, columns and gutters match the reference.");
+    return;
+  }
+  console.log(`SPACING DELTAS (${deltas.length}) — deterministic, directly CSS-able:`);
+  for (const d of deltas) {
+    console.log(`  [${d.code}] ${d.suggestedFix} (confidence ${d.confidence})`);
+  }
+}
+
+/** Convert raw-px rulers to CSS px for agent-facing output. */
+function cssRulers(rulers: RulerReport | undefined, dpr: number) {
+  if (!rulers) return undefined;
+  const px = (n: number) => applyDpr(n, dpr);
+  return {
+    background: rulers.background,
+    bands: rulers.bands.map(b => ({ y: px(b.start), height: px(b.size), background: b.background, inkDensity: b.inkDensity })),
+    contentRegion: { y: px(rulers.contentRegion.start), height: px(rulers.contentRegion.end - rulers.contentRegion.start) },
+    columns: rulers.columns.map(c => ({ x: px(c.start), width: px(c.size), inkDensity: c.inkDensity })),
+    gutters: rulers.gutters.map(g => ({ x: px(g.start), width: px(g.size) }))
+  };
 }
 
 function buildCompactExtract(report: any) {
@@ -1843,6 +1948,7 @@ function buildCompactExtract(report: any) {
       confidence: report.layoutStrategy.confidence
     } : undefined,
     gridStructure,
+    rulers: cssRulers(report.rulers, dpr),
     regions,
     text
   };

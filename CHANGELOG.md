@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.9.0 — Sizing/spacing & icons round
+
+Closes the "last mile" that left agent clones ~95% right: exact sizing/spacing and icons.
+Driven by a real session where an agent converged a GitHub-profile clone to ~5.7% but had to
+**abandon the tool and write its own pixel-projection scripts** to recover the geometry
+(top-bar height, column edges, grid stride) the tool didn't surface.
+
+### Deterministic projection "rulers" (the big one)
+- `extract` now reports a `rulers` block: background-zone **band heights** (e.g. the exact
+  top-bar/nav height + its background hex), content **columns** (left edges + widths), and
+  **gutters** (gaps between columns) — all in CSS px. Build to these instead of eyeballing
+  geometry or hand-rolling projection scripts.
+- `compare` now returns a `spacing[]` array of high-trust, directly-CSS-able deltas —
+  `BAND_HEIGHT_DELTA`, `EDGE_X_DELTA`, `GUTTER_DELTA` — each with a concrete fix
+  ("Reduce its height/padding by 11px"). `compare --spacing` prints just this list, and the
+  `--summary` line surfaces the largest delta. These replace the fuzzy "node N offset by Npx".
+
+### `--match-reference` now handles DPR (bug fix)
+- `capture --match-reference` used to set the viewport to the reference's **raw** pixel size
+  while leaving the device scale at 1, so a 2× Retina reference rendered everything
+  double-size and forced re-capture + cropping. It now captures at CSS dimensions @ the
+  reference's DPR, so the pixel sizes line up and `compare` needs no resize. New
+  `--reference-dpr <n>` overrides auto-detection; the capture reports its detected DPR and
+  hints when it's a guess.
+
+### Icons
+- Guidance across the skill + `AGENTS.md`: don't hand-draw glyphs (the most common residual
+  diff) — use an icon library (the codebase's set, else `lucide`; `@primer/octicons` for
+  GitHub-style UIs). A tested icon-region detector (`detectIconCandidates`) ships as an
+  internal primitive; a single-image icon list is intentionally **not** surfaced because
+  pixel-only detection either floods with text glyphs or hides real icons.
+
+### Capture height-overflow guard
+- `capture --match-reference` matches the viewport WIDTH; a full-page capture grows to fit
+  content. It now warns loudly when the captured height differs from the reference height
+  (a taller/shorter build silently offsets every pixel diff below the overflow).
+
+### Verified by an agent-as-user test
+- An agent rebuilt the GitHub-profile reference using only these features: the `rulers`
+  mapped directly to its sidebar/main/year columns and gutters (no hand-rolled pixel
+  scripts), the Octicons guidance made every icon pixel-match, and `--match-reference`
+  produced a correctly-scaled capture first try.
+
+### Known follow-ups (surfaced by the agent test, mostly pre-existing)
+- `compare`'s `POSITION_MISMATCH`/`SIZE_MISMATCH` issues still anchor to OCR text (e.g.
+  "main-content oo, mon a a") and can emit implausibly large phantom deltas on dynamic
+  regions (contribution graphs, avatars) while flagged actionable. The new `spacing[]`
+  channel is the high-trust path; these older per-node deltas should be down-ranked or
+  marked non-actionable on photographic content (the same logic already applied to COLOR).
+- `spacing[]` covers page-level bands/columns/gutters, not yet per-component spacing, so it
+  can empty out while finer geometry remains.
+- `gridStructure` (flat raw-pixel arrays) remains low-signal next to `rulers`.
+
 ## 0.8.0 — Agent accuracy round
 
 Fixes the most common ways an agent's clone drifts from the reference, all driven by
