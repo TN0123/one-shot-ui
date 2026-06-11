@@ -6,6 +6,7 @@ declare module "pngjs" {
     data: Uint8Array;
     static sync: {
       write(png: PNG): Uint8Array;
+      read(buffer: Uint8Array): PNG;
     };
   }
 }
