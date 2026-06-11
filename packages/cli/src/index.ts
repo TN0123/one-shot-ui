@@ -1208,6 +1208,7 @@ program
   .option("--floor <ratio>", "Mismatch ratio at or below which the build is pixel-converged", "0.002")
   .option("--reference-dpr <n>", "DPR of the reference screenshot (auto-detected when omitted)")
   .option("--no-ocr", "Disable OCR text extraction (typography fixes need it)")
+  .option("--verbose", "Also report rejected trials (debugging)", false)
   .addHelpText("after", `
 Closed-loop CSS optimizer: loads your implementation in a controlled browser,
 trials candidate CSS fixes one by one, keeps ONLY changes that measurably reduce
@@ -1297,6 +1298,7 @@ Examples:
       budgetSeconds: Number.parseInt(options.budgetSeconds, 10),
       maxPasses: Number.parseInt(options.maxPasses, 10),
       floorRatio: Number.parseFloat(options.floor),
+      verboseTrials: Boolean(options.verbose),
       onProgress: (msg: string) => console.error(`  ${msg}`),
     });
 

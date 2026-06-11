@@ -1,7 +1,12 @@
 import type { Bounds } from "@one-shot-ui/core";
 import type { Candidate, MatchedElement } from "./types.js";
 
-export const FAMILY_ORDER = ["geometry", "color", "typography", "effects"] as const;
+// Color first: color fixes are position-robust (the dominant reference color
+// under a slightly-offset element is still the right surface), while geometry
+// gains are MASKED until colors are right — inside a wrong-colored card every
+// pixel mismatches before and after any move, so position trials read as
+// zero-gain and get rejected.
+export const FAMILY_ORDER = ["color", "geometry", "typography", "effects"] as const;
 export type Family = (typeof FAMILY_ORDER)[number];
 
 const GEOMETRY_THRESHOLD_PX = 2;
@@ -398,6 +403,31 @@ export function containerCandidates(
   const dys = children.map((m) => m.region!.bounds.y - m.element.bounds.y);
 
   const medianDy = median(dys);
+  const medianDx = median(dxs);
+
+  // Diagonal offsets first, as one shorthand move: shifting one axis at a time
+  // leaves glyphs ~0% overlapping (no measurable gain → rejected); the combined
+  // move realigns them fully and crosses the ridge.
+  if (
+    medianDy != null &&
+    medianDx != null &&
+    Math.abs(medianDy) > GEOMETRY_THRESHOLD_PX &&
+    Math.abs(medianDx) > GEOMETRY_THRESHOLD_PX
+  ) {
+    const pt = parsePx(c.styles.paddingTop);
+    const pr = parsePx(c.styles.paddingRight);
+    const pb = parsePx(c.styles.paddingBottom);
+    const pl = parsePx(c.styles.paddingLeft);
+    if (pt != null && pr != null && pb != null && pl != null && pt + medianDy >= 0 && pl + medianDx >= 0) {
+      out.push({
+        selector: c.selector,
+        property: "padding",
+        value: `${pt + medianDy}px ${pr}px ${pb}px ${pl + medianDx}px`,
+        source: "geometry:container-padding-xy",
+      });
+    }
+  }
+
   if (medianDy != null && Math.abs(medianDy) > GEOMETRY_THRESHOLD_PX) {
     const pt = parsePx(c.styles.paddingTop);
     if (pt != null && pt + medianDy >= 0) {
@@ -411,7 +441,6 @@ export function containerCandidates(
     }
   }
 
-  const medianDx = median(dxs);
   if (medianDx != null && Math.abs(medianDx) > GEOMETRY_THRESHOLD_PX) {
     const pl = parsePx(c.styles.paddingLeft);
     if (pl != null && pl + medianDx >= 0) {

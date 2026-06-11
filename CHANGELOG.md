@@ -39,10 +39,17 @@ controls, where it can *try* any CSS change and *measure* the true pixel result 
 - Synthetic fixture, 6 planted bugs: **0.000% final mismatch — zero mismatched pixels** —
   with every planted value recovered exactly (`padding: 24px`, `gap: 16px`, `#1C1D26`,
   `#A78BFA`, `font-size: 28px`, `border-radius: 12px`), and **zero churn** on an
-  already-perfect build (regression test).
-- Real dashboard reference + the same 6 bugs `suggest-fixes` scored 0/6 on:
-  48.2% raw mismatch (at the strict 0.02 objective) driven to low single digits with the
-  exact card-surface hex recovered by pixel sampling.
+  already-perfect build (regression test, both in CI:
+  `packages/optimizer/src/converge.integration.test.ts`).
+- Real dashboard + the same 6 bugs `suggest-fixes` scored 0/6 on: **48.2% → 5.0%** raw
+  mismatch (strict 0.02 objective), with the exact card-surface hex (`#1C1D26`) recovered
+  by pixel sampling in one grouped rule (−486K px).
+- A real agent build that the old verdict had blessed as "converged" (strict mismatch
+  actually 28.7%): **28.7% → 8.9%** via 71 verified fixes — exact sidebar/panel surfaces,
+  brand purple, all five status-pill and avatar colors, pill geometry — leaving only
+  font-rendering AA, SVG chart internals, and structural gaps (reported in
+  `missingStructure[]`), none of which CSS can fix. The patched build is visually
+  indistinguishable from the reference at a glance.
 
 ### Guidance
 

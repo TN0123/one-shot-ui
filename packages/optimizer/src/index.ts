@@ -14,6 +14,8 @@ import {
   type CandidateContext,
 } from "./candidates.js";
 import { dominantColor } from "./sample.js";
+import { bestOffset } from "./offset.js";
+import { PNG } from "pngjs";
 import {
   createObjective,
   preparePage,
@@ -134,6 +136,15 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       if (passes === 1) {
         missingStructure = findMissingStructure(elements, opts.refData);
       }
+      if (opts.verboseTrials && passes === 1) {
+        for (const m of matched) {
+          if (m.region) {
+            progress(
+              `match: ${m.element.selector} -> ${m.region.id} iou=${m.iou.toFixed(2)} dxy=(${m.region.bounds.x - m.element.bounds.x},${m.region.bounds.y - m.element.bounds.y})`,
+            );
+          }
+        }
+      }
 
       // Trial one candidate (with greedy numeric line search); returns whether
       // it was accepted. Mutates the shared search state.
@@ -193,7 +204,63 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
         return budgetHit ? "budget" : true;
       };
 
+      // Translation-detector candidates: one screenshot per pass, then a direct
+      // pixel search for each large container's best (dx, dy) against the
+      // reference. Exact to the pixel and immune to extract-region quantization
+      // noise, this is the detector for the "whole section ghosted by a few px"
+      // failure that per-child matching cannot see reliably.
+      const offsetCandidates: import("./types.js").Candidate[] = [];
+      {
+        const shotPng = PNG.sync.read(Buffer.from(await page.screenshot({ fullPage: false })));
+        const containers = matched
+          .filter((m) => m.element.area >= 40_000)
+          .sort((a, b) => b.element.area - a.element.area)
+          .slice(0, 12);
+        for (const m of containers) {
+          const b = m.element.bounds;
+          const off = bestOffset(opts.referenceRgba, shotPng.data, opts.width, opts.height, {
+            x: b.x * scale,
+            y: b.y * scale,
+            width: b.width * scale,
+            height: b.height * scale,
+          });
+          if (!off || off.improvement < 0.02) continue;
+          const dx = Math.round(off.dx / scale);
+          const dy = Math.round(off.dy / scale);
+          if (Math.abs(dx) < 2 && Math.abs(dy) < 2) continue;
+          const s = m.element.styles;
+          const pt = parsePxStyle(s.paddingTop);
+          const pr = parsePxStyle(s.paddingRight);
+          const pb = parsePxStyle(s.paddingBottom);
+          const pl = parsePxStyle(s.paddingLeft);
+          if (pt != null && pr != null && pb != null && pl != null && pt + dy >= 0 && pl + dx >= 0) {
+            offsetCandidates.push({
+              selector: m.element.selector,
+              property: "padding",
+              value: `${pt + dy}px ${pr}px ${pb}px ${pl + dx}px`,
+              source: `geometry:pixel-offset(${dx},${dy})`,
+            });
+          }
+          const mt = parsePxStyle(s.marginTop) ?? 0;
+          const mr = parsePxStyle(s.marginRight) ?? 0;
+          const mb = parsePxStyle(s.marginBottom) ?? 0;
+          const ml = parsePxStyle(s.marginLeft) ?? 0;
+          offsetCandidates.push({
+            selector: m.element.selector,
+            property: "margin",
+            value: `${mt + dy}px ${mr}px ${mb}px ${ml + dx}px`,
+            source: `geometry:pixel-offset-margin(${dx},${dy})`,
+          });
+        }
+      }
+
       for (const family of FAMILY_ORDER) {
+        if (family === "geometry") {
+          for (const cand of offsetCandidates) {
+            const outcome = await trialOne(cand);
+            if (outcome === "budget") break outer;
+          }
+        }
         // Containers without a region of their own get geometry candidates
         // derived from their children's offsets (padding, gap) — one parent
         // fix instead of N per-child margins the greedy loop can't always
@@ -201,7 +268,7 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
         const perElement = matched.map((m) => ({
           m,
           cands:
-            family === "geometry" && !m.region
+            family === "geometry"
               ? [...containerCandidates(m, matched), ...candidatesFor(m, family, candidateCtx)]
               : candidatesFor(m, family, candidateCtx),
         }));
@@ -257,6 +324,14 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
     await context.close();
     if (ownBrowser) await browser.close();
   }
+}
+
+function parsePxStyle(s: string | undefined): number | null {
+  if (!s) return null;
+  const m = s.match(/^(-?\d*(?:\.\d+)?)px$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
 }
 
 function buildPatchCss(accepted: AcceptedFix[]): string {
