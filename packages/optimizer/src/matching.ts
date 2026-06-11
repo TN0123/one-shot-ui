@@ -30,15 +30,21 @@ export function normalizeText(s: string): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-const TEXT_TOLERANCE_PX = 6;
+/**
+ * A text block belongs to an element when most of its area overlaps it. Strict
+ * containment breaks whenever the element is still offset by a few px — exactly
+ * the state converge starts from — which would starve typography candidates.
+ */
+const TEXT_OVERLAP_RATIO = 0.5;
 
-function containsWithTolerance(outer: Bounds, inner: Bounds, tol = TEXT_TOLERANCE_PX): boolean {
-  return (
-    inner.x >= outer.x - tol &&
-    inner.y >= outer.y - tol &&
-    inner.x + inner.width <= outer.x + outer.width + tol &&
-    inner.y + inner.height <= outer.y + outer.height + tol
-  );
+function overlapsEnough(outer: Bounds, inner: Bounds, ratio = TEXT_OVERLAP_RATIO): boolean {
+  const x1 = Math.max(outer.x, inner.x);
+  const y1 = Math.max(outer.y, inner.y);
+  const x2 = Math.min(outer.x + outer.width, inner.x + inner.width);
+  const y2 = Math.min(outer.y + outer.height, inner.y + inner.height);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const innerArea = inner.width * inner.height;
+  return innerArea > 0 && inter / innerArea >= ratio;
 }
 
 export function matchElements(
@@ -46,18 +52,33 @@ export function matchElements(
   ref: ReferenceData,
   minIoU = 0.25,
 ): MatchedElement[] {
+  // One-to-one (mutual-best) assignment: an element gets a region only when it
+  // is also that region's best element. Without this, a row/section container
+  // overlapping a child-sized region (IoU just over threshold) is handed that
+  // region's geometry, and the greedy loop accepts pathological "fixes"
+  // (e.g. width: 268px on a 836px-wide flex row) that strand the search.
+  const bestElementForRegion = new Map<string, { selector: string; iou: number }>();
+  for (const region of ref.layout) {
+    let best: { selector: string; iou: number } | null = null;
+    for (const element of elements) {
+      const iou = bboxIoU(region.bounds, element.bounds);
+      if (!best || iou > best.iou) best = { selector: element.selector, iou };
+    }
+    if (best && best.iou > 0) bestElementForRegion.set(region.id, best);
+  }
+
   return elements.map((element) => {
     let bestIoU = 0;
     let best: ReferenceData["layout"][number] | null = null;
     for (const region of ref.layout) {
       const iou = bboxIoU(region.bounds, element.bounds);
-      if (iou > bestIoU) {
+      if (iou > bestIoU && bestElementForRegion.get(region.id)?.selector === element.selector) {
         bestIoU = iou;
         best = region;
       }
     }
     const textBlocks = ref.text
-      .filter((t) => containsWithTolerance(element.bounds, t.bounds))
+      .filter((t) => overlapsEnough(element.bounds, t.bounds))
       .map((t) => ({
         text: t.text,
         bounds: t.bounds,

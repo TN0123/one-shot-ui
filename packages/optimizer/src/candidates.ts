@@ -1,3 +1,4 @@
+import type { Bounds } from "@one-shot-ui/core";
 import type { Candidate, MatchedElement } from "./types.js";
 
 export const FAMILY_ORDER = ["geometry", "color", "typography", "effects"] as const;
@@ -238,6 +239,111 @@ function effectsCandidates(m: MatchedElement): Candidate[] {
   }
 
   return out;
+}
+
+/**
+ * Geometry candidates for a container that matched no reference region, derived
+ * from its matched children. When children are uniformly offset from their
+ * regions the cause is usually the container's padding, and when adjacent
+ * children's reference gaps disagree with the computed flex/grid gap the cause
+ * is the gap — one container fix instead of N per-child margin nudges (which
+ * coordinate descent often cannot accept one at a time without breaking
+ * siblings' already-correct positions).
+ */
+export function containerCandidates(
+  container: MatchedElement,
+  allMatched: MatchedElement[],
+): Candidate[] {
+  const out: Candidate[] = [];
+  const c = container.element;
+
+  const children = allMatched.filter((m) => {
+    if (m === container || !m.region) return false;
+    if (m.element.depth <= c.depth) return false;
+    return overlapRatio(c.bounds, m.element.bounds) >= 0.9;
+  });
+  if (!children.length) return out;
+
+  const dxs = children.map((m) => m.region!.bounds.x - m.element.bounds.x);
+  const dys = children.map((m) => m.region!.bounds.y - m.element.bounds.y);
+
+  const medianDy = median(dys);
+  if (medianDy != null && Math.abs(medianDy) > GEOMETRY_THRESHOLD_PX) {
+    const pt = parsePx(c.styles.paddingTop);
+    if (pt != null && pt + medianDy >= 0) {
+      out.push({
+        selector: c.selector,
+        property: "padding-top",
+        value: `${pt + medianDy}px`,
+        source: "geometry:container-padding-top",
+        numeric: { base: pt + medianDy, unit: "px" },
+      });
+    }
+  }
+
+  const medianDx = median(dxs);
+  if (medianDx != null && Math.abs(medianDx) > GEOMETRY_THRESHOLD_PX) {
+    const pl = parsePx(c.styles.paddingLeft);
+    if (pl != null && pl + medianDx >= 0) {
+      out.push({
+        selector: c.selector,
+        property: "padding-left",
+        value: `${pl + medianDx}px`,
+        source: "geometry:container-padding-left",
+        numeric: { base: pl + medianDx, unit: "px" },
+      });
+    }
+  }
+
+  if (/^(flex|grid|inline-flex|inline-grid)$/.test(c.styles.display ?? "")) {
+    const refGap = medianAdjacentGap(children);
+    const current = parsePx(c.styles.gap) ?? parsePx(c.styles.columnGap) ?? parsePx(c.styles.rowGap);
+    if (refGap != null && refGap >= 0 && current != null && Math.abs(refGap - current) > GEOMETRY_THRESHOLD_PX) {
+      out.push({
+        selector: c.selector,
+        property: "gap",
+        value: `${refGap}px`,
+        source: "geometry:container-gap",
+        numeric: { base: refGap, unit: "px" },
+      });
+    }
+  }
+
+  return out;
+}
+
+/** Median gap between adjacent children's REFERENCE regions, x-axis then y-axis. */
+function medianAdjacentGap(children: MatchedElement[]): number | null {
+  const gaps: number[] = [];
+  const byX = [...children].sort((a, b) => a.region!.bounds.x - b.region!.bounds.x);
+  for (let i = 0; i + 1 < byX.length; i++) {
+    const a = byX[i]!.region!.bounds;
+    const b = byX[i + 1]!.region!.bounds;
+    const yOverlap = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+    const gap = b.x - (a.x + a.width);
+    if (yOverlap > Math.min(a.height, b.height) / 2 && gap >= 0) gaps.push(gap);
+  }
+  if (!gaps.length) {
+    const byY = [...children].sort((a, b) => a.region!.bounds.y - b.region!.bounds.y);
+    for (let i = 0; i + 1 < byY.length; i++) {
+      const a = byY[i]!.region!.bounds;
+      const b = byY[i + 1]!.region!.bounds;
+      const xOverlap = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+      const gap = b.y - (a.y + a.height);
+      if (xOverlap > Math.min(a.width, b.width) / 2 && gap >= 0) gaps.push(gap);
+    }
+  }
+  return median(gaps);
+}
+
+function overlapRatio(outer: Bounds, inner: Bounds): number {
+  const x1 = Math.max(outer.x, inner.x);
+  const y1 = Math.max(outer.y, inner.y);
+  const x2 = Math.min(outer.x + outer.width, inner.x + inner.width);
+  const y2 = Math.min(outer.y + outer.height, inner.y + inner.height);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const area = inner.width * inner.height;
+  return area > 0 ? inter / area : 0;
 }
 
 function withElement(m: MatchedElement) {

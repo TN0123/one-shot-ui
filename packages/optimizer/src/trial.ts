@@ -5,6 +5,15 @@ import type { Page } from "playwright";
 /** Minimum mismatch-pixel reduction to accept a candidate (anti-AA-churn). */
 export const MIN_GAIN_PIXELS = 8;
 
+/**
+ * Stricter than compare's 0.12: at 0.12 pixelmatch's YIQ cutoff (~507) is blind
+ * to dark-theme color drift (e.g. #1C1D26 vs #262834 ≈ 62), and at 0.03 (~32)
+ * still blind to adjacent-surface edges (#1C1D26 card vs #15161C body ≈ 28),
+ * which silently vetoes small position fixes. 0.02 (~14) sees both; pixelmatch
+ * AA detection + MIN_GAIN_PIXELS keep anti-aliasing churn out of acceptance.
+ */
+export const OBJECTIVE_THRESHOLD = 0.02;
+
 const SETTLE_MS = 60;
 const STYLE_TAG_ID = "one-shot-ui-converge";
 const PREP_TAG_ID = "one-shot-ui-converge-prep";
@@ -20,6 +29,7 @@ export function createObjective(
   referenceRgba: Uint8ClampedArray,
   width: number,
   height: number,
+  threshold: number = OBJECTIVE_THRESHOLD,
 ): Objective {
   const total = width * height;
   const refData = new Uint8Array(referenceRgba.buffer, referenceRgba.byteOffset, referenceRgba.byteLength);
@@ -33,7 +43,7 @@ export function createObjective(
           `Screenshot is ${shot.width}x${shot.height}, expected ${width}x${height} (reference raw px). Viewport/DPR drift.`,
         );
       }
-      return pixelmatch(refData, shot.data, undefined, width, height, { threshold: 0.12 });
+      return pixelmatch(refData, shot.data, undefined, width, height, { threshold });
     },
   };
 }
