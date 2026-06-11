@@ -40,23 +40,35 @@ wrong with a UI implementation compared to a reference screenshot.
    these first; they're the highest-trust path to closing the last-mile spacing gap.
    `compare … --spacing` prints just this list.
 
-5. **Suggest Fixes** — Get actionable CSS fix suggestions:
+5. **Converge** *(the key step — pixel-verified CSS optimization)*:
+       one-shot-ui converge reference.png --impl ./index.html --json
+   Loads your build in a controlled browser, trials candidate CSS fixes one at
+   a time (geometry, exact pixel-sampled colors, typography, effects), keeps
+   ONLY changes that measurably reduce true pixel mismatch, and writes a
+   verified patch (every line annotated with its measured pixel gain). Fold the
+   patch values into your source (drop the `!important`s), build any
+   `missingStructure[]` regions it reports (converge never invents elements),
+   and re-run until `verdict: "pixel-converged"`. Unlike `suggest-fixes`
+   estimates, a converge fix cannot be wrong about its result — it was measured
+   against the reference before being kept.
+
+6. **Suggest Fixes** — fast one-shot CSS estimates (unverified hints):
        one-shot-ui suggest-fixes reference.png impl.png --json
 
-6. **Run** — Automated multi-pass refinement loop:
+7. **Run** — Automated multi-pass refinement loop:
        one-shot-ui run reference.png --impl ./index.html --output ./passes
 
-7. **Serve** *(recommended)* — Watch-mode HTTP server with live DOM-aware queries:
+8. **Serve** — Watch-mode HTTP server with live DOM-aware queries:
        one-shot-ui serve --ref reference.png --impl ./index.html --port 7777
    Returns real CSS diffs anchored to selectors that exist in your HTML, and
    lets you test candidate fixes via `POST /apply-temp` before committing them.
-   This is the fastest path to convergence for an agent.
 
 ## Commands Reference
 
 | Command         | Purpose                                    | Key Flags                          |
 |-----------------|--------------------------------------------|----------------------------------  |
 | extract         | Analyze screenshot into layout/color/text  | --json, --no-ocr, --overlay, --fine|
+| converge        | Closed-loop pixel-verified CSS optimizer   | --impl, --out, --json, --budget-seconds, --reference-dpr |
 | compare         | Pixel + structural diff + spacing deltas   | --json, --heatmap, --spacing, --dom-diff |
 | tokens          | Extract design tokens                      | --json                             |
 | plan            | Generate implementation strategy           | --json                             |
@@ -68,8 +80,8 @@ wrong with a UI implementation compared to a reference screenshot.
 | benchmark       | Run benchmark suites                       | --json, --output                   |
 
 If your client speaks MCP, you can skip the CLI entirely: `one-shot-ui mcp` exposes
-`compare`, `suggest_fixes`, `extract`, `tokens`, and `plan` as tools (stdio, local, no API
-keys). See `docs/MCP.md`.
+`converge`, `compare`, `suggest_fixes`, `extract`, `tokens`, and `plan` as tools (stdio,
+local, no API keys). See `docs/MCP.md`.
 
 ### `serve` endpoints (HTTP, default port 7777)
 
@@ -87,6 +99,12 @@ with Zod schemas and follow stable interfaces.
 ## Tips for Agents
 
 - Always use `--json` to get structured output you can parse.
+- **Finish with `converge`.** After your build is structurally complete, run
+  `converge` and fold its verified patch into your source; repeat until
+  `pixel-converged`. This replaces hand-applying estimated fixes — every
+  converge fix is pre-proven against your actual build, including exact surface
+  colors sampled from the reference pixels (which catch dark-theme color drift
+  the heatmap hides).
 - **Pass `--dpr 2` for Retina/Mac screenshots** (CLI) or `dpr: 2` (MCP). This is the
   single biggest accuracy win — without it, a 2x screenshot's 35px heading and 8px gaps
   are reported as 70px and 16px, throwing off fonts, spacing, and sizing together.

@@ -88,16 +88,39 @@ and the reasons (e.g. missing structural coverage, low hierarchy, a region holdi
 of the mismatch). Address the reasons, re-compare, and only stop once it reports
 CONVERGED.
 
-### Step 4: Fix issues
-Run `one-shot-ui suggest-fixes <reference.png> impl.png --json` to get specific
-Tailwind/CSS fix suggestions. Apply them and re-compare.
+### Step 4: Converge — pixel-verified CSS optimization (the key step)
 
-### Automated Loop
-For hands-off refinement, use:
-`one-shot-ui run <reference.png> --impl ./index.html --output ./passes --max-passes 5 --threshold 0.02`
+Once the structure is in place, run:
+```
+one-shot-ui converge <reference.png> --impl ./index.html --json
+```
+This is the step that actually closes the last mile. It loads your build in a
+controlled browser and runs a closed-loop search: candidate CSS fixes (sizes,
+paddings, gaps, margins, exact background/text colors sampled from the
+reference pixels, font sizes/weights, border radii) are trialed one at a time,
+and ONLY changes that measurably reduce true pixel mismatch are kept. The
+output is a **verified patch** (`one-shot-converge/patch.css`) — every
+declaration in it is already proven against your actual build, with the pixel
+gain annotated.
 
-This runs the extract→capture→compare→fix loop automatically, writing artifacts
-for each pass.
+What to do with the result:
+1. Fold the patch values into your source styles (drop the `!important`s).
+2. If `missingStructure[]` is non-empty, those reference regions have no
+   element in your build — converge never invents elements. Add them, then
+   re-run converge.
+3. Repeat until `verdict: "pixel-converged"`. A `css-exhausted` verdict means
+   no CSS change improves the pixels further — the residual is missing
+   structure, content differences, or rendering noise; it is honest, not stuck.
+
+Why prefer this over manually applying `suggest-fixes`: suggestions are
+one-shot estimates from pixels and can be wrong; converge's fixes cannot be —
+each one was measured against the reference before it was kept.
+
+### Fallbacks / quick passes
+- `one-shot-ui suggest-fixes <reference.png> impl.png --json` — fast one-shot
+  estimates when you only want hints, not verified fixes.
+- `one-shot-ui run <reference.png> --impl ./index.html --output ./passes` —
+  the older extract→capture→compare→fix loop with per-pass artifacts.
 
 ### Watch-Mode Server (recommended for iterative work)
 

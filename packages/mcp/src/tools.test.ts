@@ -101,9 +101,10 @@ describe("tool arg building", () => {
     ]);
   });
 
-  it("exposes exactly the five read-only tools", () => {
+  it("exposes exactly the expected tools", () => {
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "compare",
+      "converge",
       "extract",
       "plan",
       "suggest_fixes",
