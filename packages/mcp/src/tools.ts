@@ -163,7 +163,46 @@ const plan: ToolSpec = {
   },
 };
 
-export const TOOLS: ToolSpec[] = [compare, extract, suggestFixes, tokens, plan];
+const convergeTool: ToolSpec = {
+  name: "converge",
+  title: "Closed-loop optimize a live build's CSS to pixel-match a reference",
+  description:
+    "The highest-trust path to a pixel-perfect build. Loads your implementation (HTML file or URL) in a " +
+    "controlled headless browser, trials candidate CSS fixes one at a time (geometry, colors, typography, " +
+    "effects — seeded from the reference's measured structure and pixels), keeps ONLY changes that " +
+    "measurably reduce real pixel mismatch against the reference screenshot, and returns a verified CSS " +
+    "patch plus before/after mismatch numbers. Unlike suggest_fixes, every returned declaration is already " +
+    "proven against your actual build — apply the patch values to your source, rebuild, and re-run until " +
+    "the verdict is `pixel-converged`. A `missingStructure[]` list reports reference regions no element " +
+    "covers (converge never invents elements — build those yourself, then re-run). Needs Playwright " +
+    "Chromium installed. Typical runtime is 1–5 minutes depending on how far the build is from the reference.",
+  inputSchema: {
+    reference_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the reference (design) screenshot."),
+    impl_path: z.string().describe("Path to the implementation HTML file, or an http(s) URL of the running app."),
+    out_path: z.string().optional().describe("Where to write the verified CSS patch (default ./one-shot-converge/patch.css)."),
+    max_evals: z.number().int().positive().optional().describe("Trial budget; each trial is one screenshot + diff (default 2000)."),
+    budget_seconds: z.number().int().positive().optional().describe("Time budget in seconds (default 300)."),
+    reference_dpr: z.number().positive().optional().describe("DPR of the reference screenshot (pass 2 for Retina/Mac captures). Auto-detected when omitted."),
+  },
+  build(a) {
+    return {
+      command: "converge",
+      cliArgs: [
+        "converge",
+        String(a.reference_path),
+        "--impl",
+        String(a.impl_path),
+        "--json",
+        ...flag(a.out_path, "--out", String(a.out_path)),
+        ...flag(a.max_evals, "--max-evals", String(a.max_evals)),
+        ...flag(a.budget_seconds, "--budget-seconds", String(a.budget_seconds)),
+        ...flag(a.reference_dpr, "--reference-dpr", String(a.reference_dpr)),
+      ],
+    };
+  },
+};
+
+export const TOOLS: ToolSpec[] = [compare, extract, suggestFixes, tokens, plan, convergeTool];
 
 /** Tool args whose values must point at an existing file before the CLI is spawned. */
 export const REQUIRED_FILE_ARGS = new Set(["reference_path", "implementation_path", "image_path"]);

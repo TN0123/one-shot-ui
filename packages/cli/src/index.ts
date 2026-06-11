@@ -40,6 +40,7 @@ import { labelNodes } from "@one-shot-ui/semantic-label";
 import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
 import { resolveFixTarget, inferCssCategory } from "./fix-target.js";
 import { resolveMatchReferenceViewport } from "./match-reference.js";
+import { converge, type ReferenceData } from "@one-shot-ui/optimizer";
 
 const program = new Command();
 program.name("one-shot-ui").description("Deterministic UI extraction and diff toolkit").version(VERSION);
@@ -66,6 +67,68 @@ function parseDprOption(raw: string | undefined): number | undefined {
   if (raw == null) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Estimate the ink (foreground) color of a text block by histogramming its
+ * pixels in the reference image: the most common quantized color is the
+ * background; the most common DISTANT color with a meaningful share is the ink.
+ * Deterministic; returns null when no distinct ink color stands out.
+ */
+function estimateTextInkColor(
+  image: { width: number; height: number; channels: number; data: Uint8ClampedArray },
+  bounds: { x: number; y: number; width: number; height: number },
+): string | null {
+  const x0 = Math.max(0, Math.floor(bounds.x));
+  const y0 = Math.max(0, Math.floor(bounds.y));
+  const x1 = Math.min(image.width, Math.ceil(bounds.x + bounds.width));
+  const y1 = Math.min(image.height, Math.ceil(bounds.y + bounds.height));
+  if (x1 <= x0 || y1 <= y0) return null;
+
+  const counts = new Map<number, number>();
+  let total = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const off = (y * image.width + x) * image.channels;
+      // Quantize to 4 bits/channel to merge anti-aliased shades.
+      const key =
+        ((image.data[off]! >> 4) << 8) | ((image.data[off + 1]! >> 4) << 4) | (image.data[off + 2]! >> 4);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      total++;
+    }
+  }
+  if (!total) return null;
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const bg = sorted[0]![0];
+  const bgRgb = [(bg >> 8) & 0xf, (bg >> 4) & 0xf, bg & 0xf];
+  for (const [key, count] of sorted.slice(1)) {
+    if (count / total < 0.04) break;
+    const rgb = [(key >> 8) & 0xf, (key >> 4) & 0xf, key & 0xf];
+    const dist = Math.abs(rgb[0]! - bgRgb[0]!) + Math.abs(rgb[1]! - bgRgb[1]!) + Math.abs(rgb[2]! - bgRgb[2]!);
+    if (dist < 6) continue; // an anti-aliased shade of the background, not ink
+    // Refine: average the full-precision pixels in this quantization bucket.
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const off = (y * image.width + x) * image.channels;
+        const k =
+          ((image.data[off]! >> 4) << 8) | ((image.data[off + 1]! >> 4) << 4) | (image.data[off + 2]! >> 4);
+        if (k === key) {
+          r += image.data[off]!;
+          g += image.data[off + 1]!;
+          b += image.data[off + 2]!;
+          n++;
+        }
+      }
+    }
+    if (!n) continue;
+    const toHex = (v: number) => Math.round(v / n).toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+  }
+  return null;
 }
 
 /** Normalize a px-valued design token to CSS px for the given dpr; pass others through. */
@@ -1127,6 +1190,147 @@ Examples:
         console.error(`  ${convergenceSummary.message}`);
       }
       console.error(`  Session log: ${resolve(outputDir, "session.json")}`);
+    }
+  });
+
+program
+  .command("converge")
+  .argument("[referencePath]", "Path to the reference screenshot")
+  .option("--impl <path>", "Path to implementation HTML file or URL")
+  .option("--implementation <path>", "Alias for --impl")
+  .option("--file <path>", "Alias for --impl")
+  .option("--reference <path>", "Alias for the referencePath argument")
+  .option("--out <path>", "Path to write the verified CSS patch", "./one-shot-converge/patch.css")
+  .option("--json", "Print the full JSON report", false)
+  .option("--max-evals <n>", "Trial budget (each trial = one screenshot + diff)", "2000")
+  .option("--budget-seconds <n>", "Time budget in seconds", "300")
+  .option("--max-passes <n>", "Maximum optimization passes", "8")
+  .option("--floor <ratio>", "Mismatch ratio at or below which the build is pixel-converged", "0.002")
+  .option("--reference-dpr <n>", "DPR of the reference screenshot (auto-detected when omitted)")
+  .option("--no-ocr", "Disable OCR text extraction (typography fixes need it)")
+  .option("--verbose", "Also report rejected trials (debugging)", false)
+  .addHelpText("after", `
+Closed-loop CSS optimizer: loads your implementation in a controlled browser,
+trials candidate CSS fixes one by one, keeps ONLY changes that measurably reduce
+pixel mismatch against the reference, and writes the surviving fixes as a
+verified CSS patch. Unlike suggest-fixes, every line of output is already
+proven against your actual build.
+
+Examples:
+  one-shot-ui converge reference.png --impl ./index.html
+  one-shot-ui converge reference.png --impl http://localhost:3000 --json
+  one-shot-ui converge reference.png --impl ./index.html --reference-dpr 2`)
+  .action(async (referencePathArg, options) => {
+    ensureChromium();
+    const refPathRaw = referencePathArg ?? options.reference;
+    const implPath = options.impl ?? options.implementation ?? options.file;
+    if (!refPathRaw || !implPath) {
+      console.error("Error: both a reference screenshot and --impl are required.");
+      console.error("Usage: one-shot-ui converge <reference.png> --impl ./index.html");
+      process.exit(1);
+    }
+    const refPath = resolve(refPathRaw);
+    assertInputExists("reference", refPath);
+    if (!implPath.startsWith("http") && !existsSync(resolve(implPath))) {
+      console.error(describeMissingImagePath("implementation", resolve(implPath)));
+      process.exit(1);
+    }
+
+    const refImage = await loadImage(refPath);
+    const explicitDpr = parseDprOption(options.referenceDpr);
+    const estimate = estimateDpr(refImage);
+    const vp = resolveMatchReferenceViewport({
+      rawWidth: refImage.width,
+      rawHeight: refImage.height,
+      estimatedDpr: estimate.dpr,
+      explicitDpr,
+    });
+    const dprSrc = explicitDpr ? "explicit" : `auto, ${(estimate.confidence * 100).toFixed(0)}% conf`;
+    console.error(`Viewport ${vp.width}x${vp.height} @ ${vp.scale}x (reference ${refImage.width}x${refImage.height} raw, dpr ${vp.dpr} — ${dprSrc})`);
+    if (!explicitDpr && estimate.confidence < 0.85 && vp.dpr === 1) {
+      console.error(`  DPR is a guess — pass --reference-dpr 2 if the reference is a Retina/Mac screenshot.`);
+    }
+
+    console.error("Extracting reference structure...");
+    const report = await extractImageReport(refPath, {
+      disableOcr: options.ocr === false,
+      dpr: vp.dpr,
+    });
+    const toCss = (n: number) => applyDpr(n, vp.dpr);
+    const scaleBounds = (b: { x: number; y: number; width: number; height: number }) => ({
+      x: toCss(b.x),
+      y: toCss(b.y),
+      width: toCss(b.width),
+      height: toCss(b.height),
+    });
+    const refData: ReferenceData = {
+      layout: report.layout
+        .filter((n: any) => n.kind === "region")
+        .map((n: any) => ({
+          id: n.id,
+          bounds: scaleBounds(n.bounds),
+          fill: n.fill ?? null,
+          borderRadius: n.borderRadius == null ? null : toCss(n.borderRadius),
+        })),
+      text: report.text.map((t: any) => ({
+        text: t.text,
+        bounds: scaleBounds(t.bounds),
+        typography: t.typography
+          ? {
+              fontSize: t.typography.fontSize == null ? null : toCss(t.typography.fontSize),
+              fontWeight: t.typography.fontWeight ?? null,
+            }
+          : null,
+        color: estimateTextInkColor(refImage, t.bounds),
+      })),
+    };
+
+    console.error(`Optimizing ${implPath} against ${refPathRaw}...`);
+    const result = await converge({
+      referencePath: refPath,
+      implPath,
+      referenceRgba: refImage.data,
+      width: refImage.width,
+      height: refImage.height,
+      viewport: { width: vp.width, height: vp.height, scale: vp.scale },
+      refData,
+      maxEvals: Number.parseInt(options.maxEvals, 10),
+      budgetSeconds: Number.parseInt(options.budgetSeconds, 10),
+      maxPasses: Number.parseInt(options.maxPasses, 10),
+      floorRatio: Number.parseFloat(options.floor),
+      verboseTrials: Boolean(options.verbose),
+      onProgress: (msg: string) => console.error(`  ${msg}`),
+    });
+
+    const outPath = resolve(options.out);
+    await mkdir(dirname(outPath), { recursive: true });
+    await writeFile(outPath, result.patchCss || "/* converge: no fixes accepted */\n", "utf8");
+
+    if (options.json) {
+      console.log(JSON.stringify({ ...result, patchPath: outPath }, null, 2));
+      return;
+    }
+
+    const pct = (r: number) => `${(r * 100).toFixed(2)}%`;
+    console.log(`Verdict: ${result.verdict} — ${pct(result.finalMismatchRatio)} mismatch (was ${pct(result.initialMismatchRatio)})`);
+    console.log(`Accepted ${result.accepted.length} fixes, rejected ${result.rejectedCount} (${result.evals} trials, ${result.passes} passes)`);
+    console.log(`Patch: ${outPath}`);
+    if (result.accepted.length) {
+      console.log("");
+      for (const fix of result.accepted) {
+        console.log(`  ${fix.selector} { ${fix.property}: ${fix.value}; }  /* -${fix.gainPixels} px */`);
+      }
+    }
+    if (result.missingStructure.length) {
+      console.log("");
+      console.log(`Missing structure (${result.missingStructure.length}) — converge cannot create elements; build these, fold in the patch, re-run:`);
+      for (const m of result.missingStructure) {
+        console.log(`  - ${m.bounds.width}x${m.bounds.height} region at (${m.bounds.x},${m.bounds.y}): ${m.note}`);
+      }
+    }
+    if (result.verdict === "css-exhausted") {
+      console.log("");
+      console.log("No remaining CSS candidate improves the pixels. Residual mismatch is structure/content (see missing structure above) or rendering noise.");
     }
   });
 

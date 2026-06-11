@@ -67,6 +67,10 @@ one-shot-ui compare reference.png build.png --json --heatmap heatmap.png
 # Get copy-paste CSS fixes, ranked by impact
 one-shot-ui suggest-fixes reference.png build.png --json
 
+# The step that gets you pixel-perfect: trial fixes in a live browser and keep
+# only the ones that provably reduce pixel mismatch — outputs a verified patch
+one-shot-ui converge reference.png --impl ./index.html
+
 # Or run the full automated loop until it converges
 one-shot-ui run reference.png --impl ./index.html --max-passes 5 --threshold 0.02
 ```
@@ -119,6 +123,7 @@ See [docs/MCP.md](./docs/MCP.md) for per-client setup and registry publishing.
 | `plan` | Generate an implementation strategy | `--json` |
 | `capture` | Screenshot a URL or local HTML file | `--url`, `--file`, `--output` |
 | `suggest-fixes` | Tailwind/CSS fix suggestions from a diff | `--json`, `--top`, `--dom-diff`, `--framework` |
+| `converge` | Closed-loop optimizer: pixel-verified CSS patch | `--impl`, `--out`, `--json`, `--budget-seconds` |
 | `run` | Multi-pass extract→capture→compare→fix loop | `--impl`, `--max-passes`, `--threshold` |
 | `benchmark` | Run benchmark suites | `--json`, `--output` |
 

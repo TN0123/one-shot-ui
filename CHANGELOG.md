@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.10.0 — `converge`: closed-loop pixel-verified CSS optimization
+
+The step change. Every release since 0.6 made the tool's *estimates* better, and agent
+builds still plateaued at ~2–5% mismatch — because estimating CSS from flat pixels is the
+ceiling, and the "converged" verdict fired right where the last mile begins. Ground-truth
+probe that drove this release: a build with 6 planted CSS bugs (padding, font-size, gap,
+two colors, radius) scored 2.08% / `converged`, and `suggest-fixes` recovered **0/6** —
+phantom 224px offsets, no selectors, no color or font fixes.
+
+### `one-shot-ui converge <reference.png> --impl <html|url>` (also an MCP tool)
+
+The unexploited asset: the tool already holds the implementation open in a Chromium it
+controls, where it can *try* any CSS change and *measure* the true pixel result in
+~150ms. `converge` automates that loop:
+
+- **DOM inventory** with verified-unique selectors (`#id` / class chains / nth-of-type).
+- **Mutual-best matching** of elements to reference regions (one-to-one by IoU, so a row
+  container can never steal its child's region) + overlap-based OCR text attachment.
+- **Candidates seeded from measurements, accepted only by pixels**: geometry from region
+  deltas; container padding/gap inferred from children's uniform offsets (fix the cause,
+  not N per-child margins); **exact surface colors pixel-sampled from the reference**
+  under each element (bypasses quantized extract fills); font size/weight from OCR;
+  radii from extract. Same-class elements that agree get one grouped rule
+  (`td { padding-top: 14px }`) instead of 20 `nth-of-type` patches.
+- **Greedy multi-pass search with strict acceptance**: a candidate is kept only if raw
+  pixel mismatch (pixelmatch at threshold 0.02 — sensitive enough to see dark-theme color
+  drift that 0.12 is blind to) drops by ≥8px; numeric values get a ±1/±2/±4 line search;
+  rejections are retried in later passes (a position fix may only pay off after a color
+  fix lands). The search stops only when a full pass accepts nothing.
+- **Output an agent can trust blindly**: a verified `patch.css` (every declaration
+  annotated with its measured pixel gain), a `missingStructure[]` list of reference
+  regions no element covers (converge never invents elements — that's the agent's half),
+  and an honest verdict: `pixel-converged`, `css-exhausted`, or `budget-exhausted`.
+
+### Verified against ground truth
+
+- Synthetic fixture, 6 planted bugs: **0.000% final mismatch — zero mismatched pixels** —
+  with every planted value recovered exactly (`padding: 24px`, `gap: 16px`, `#1C1D26`,
+  `#A78BFA`, `font-size: 28px`, `border-radius: 12px`), and **zero churn** on an
+  already-perfect build (regression test, both in CI:
+  `packages/optimizer/src/converge.integration.test.ts`).
+- Real dashboard + the same 6 bugs `suggest-fixes` scored 0/6 on: **48.2% → 5.0%** raw
+  mismatch (strict 0.02 objective), with the exact card-surface hex (`#1C1D26`) recovered
+  by pixel sampling in one grouped rule (−486K px).
+- A real agent build that the old verdict had blessed as "converged" (strict mismatch
+  actually 28.7%): **28.7% → 8.9%** via 71 verified fixes — exact sidebar/panel surfaces,
+  brand purple, all five status-pill and avatar colors, pill geometry — leaving only
+  font-rendering AA, SVG chart internals, and structural gaps (reported in
+  `missingStructure[]`), none of which CSS can fix. The patched build is visually
+  indistinguishable from the reference at a glance.
+
+### Guidance
+
+`AGENTS.md` + the Claude Code skill now prescribe: extract → build structure → converge →
+fold patch into source → build `missingStructure[]` → re-converge until `pixel-converged`.
+
 ## 0.9.0 — Sizing/spacing & icons round
 
 Closes the "last mile" that left agent clones ~95% right: exact sizing/spacing and icons.
