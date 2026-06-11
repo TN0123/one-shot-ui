@@ -6,6 +6,7 @@ import type { ElementInfo } from "./types.js";
 function el(partial: Partial<ElementInfo> & { selector: string }): ElementInfo {
   return {
     tag: "div",
+    classes: [],
     bounds: { x: 0, y: 0, width: 100, height: 100 },
     area: 10000,
     depth: 1,

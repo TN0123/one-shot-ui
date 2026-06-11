@@ -89,6 +89,7 @@ function collectElementsInPage(styleKeys: string[], maxElements: number): Elemen
     out.push({
       selector: buildSelector(el),
       tag: el.tagName.toLowerCase(),
+      classes: Array.from((el as HTMLElement).classList).slice(0, 3),
       bounds: {
         x: Math.round(r.x),
         y: Math.round(r.y),

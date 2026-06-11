@@ -3,6 +3,8 @@ import type { Bounds } from "@one-shot-ui/core";
 export interface ElementInfo {
   selector: string;
   tag: string;
+  /** Class list (first few), used to group identical fixes into one CSS rule. */
+  classes: string[];
   /** CSS px, viewport-relative. */
   bounds: Bounds;
   area: number;

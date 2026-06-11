@@ -4,7 +4,16 @@ import { chromium, type Browser, type Page } from "playwright";
 import type { AcceptedFix, ConvergeReport, MissingStructure } from "./types.js";
 import { collectElements } from "./inventory.js";
 import { matchElements, findMissingStructure, type ReferenceData } from "./matching.js";
-import { candidatesFor, containerCandidates, refinementValues, FAMILY_ORDER } from "./candidates.js";
+import {
+  candidatesFor,
+  containerCandidates,
+  groupCandidates,
+  groupSelectorOf,
+  refinementValues,
+  FAMILY_ORDER,
+  type CandidateContext,
+} from "./candidates.js";
+import { dominantColor } from "./sample.js";
 import {
   createObjective,
   preparePage,
@@ -74,6 +83,18 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
     await page.goto(implUrl, { waitUntil: "networkidle", timeout: 30_000 });
     await preparePage(page);
 
+    // CSS-px bounds → raw reference px for pixel sampling.
+    const scale = opts.viewport.scale;
+    const candidateCtx: CandidateContext = {
+      sampleFill: (b) =>
+        dominantColor(opts.referenceRgba, opts.width, opts.height, 4, {
+          x: b.x * scale,
+          y: b.y * scale,
+          width: b.width * scale,
+          height: b.height * scale,
+        }),
+    };
+
     const objective = createObjective(
       page,
       opts.referenceRgba,
@@ -114,70 +135,96 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
         missingStructure = findMissingStructure(elements, opts.refData);
       }
 
-      for (const family of FAMILY_ORDER) {
-        for (const m of matched) {
-          // Containers without a region of their own get geometry candidates
-          // derived from their children's offsets (padding, gap) — one parent
-          // fix instead of N per-child margins the greedy loop can't always
-          // accept individually.
-          const cands =
-            family === "geometry" && !m.region
-              ? containerCandidates(m, matched)
-              : candidatesFor(m, family);
-          for (const cand of cands) {
-            const key = `${cand.selector}|${cand.property}|${cand.value}`;
-            if (triedAndRejected.has(key)) continue;
-            // Re-tuning an accepted property with a NEW value is allowed (later
-            // passes see updated bboxes); re-trying the same value is not.
-            if (rules.get(cand.selector)?.get(cand.property) === cand.value) continue;
+      // Trial one candidate (with greedy numeric line search); returns whether
+      // it was accepted. Mutates the shared search state.
+      const trialOne = async (cand: import("./types.js").Candidate): Promise<boolean | "budget"> => {
+        const key = `${cand.selector}|${cand.property}|${cand.value}`;
+        if (triedAndRejected.has(key)) return false;
+        // Re-tuning an accepted property with a NEW value is allowed (later
+        // passes see updated bboxes); re-trying the same value is not.
+        if (rules.get(cand.selector)?.get(cand.property) === cand.value) return false;
+        if (evals >= maxEvals || Date.now() - startedAt > budgetMs) {
+          budgetHit = true;
+          return "budget";
+        }
+
+        const res = await trialCandidate(ctx, currentPixels, cand.selector, cand.property, cand.value);
+        evals++;
+        if (!res.accepted) {
+          triedAndRejected.add(key);
+          rejectedCount++;
+          if (opts.verboseTrials) {
+            progress(`pass ${passes}: rejected ${cand.selector} { ${cand.property}: ${cand.value} } (${cand.source})`);
+          }
+          return false;
+        }
+
+        let bestPixels = res.pixels;
+        let bestValue = cand.value;
+
+        // Greedy numeric line search around the accepted value.
+        if (cand.numeric) {
+          for (const refined of refinementValues(cand.numeric.base, cand.numeric.unit)) {
             if (evals >= maxEvals || Date.now() - startedAt > budgetMs) {
               budgetHit = true;
-              break outer;
+              break;
             }
-
-            const res = await trialCandidate(ctx, currentPixels, cand.selector, cand.property, cand.value);
+            const r = await trialCandidate(ctx, bestPixels, cand.selector, cand.property, refined);
             evals++;
-            if (!res.accepted) {
-              triedAndRejected.add(key);
-              rejectedCount++;
-              if (opts.verboseTrials) {
-                progress(`pass ${passes}: rejected ${cand.selector} { ${cand.property}: ${cand.value} } (${cand.source})`);
-              }
-              continue;
+            if (r.accepted) {
+              bestPixels = r.pixels;
+              bestValue = refined;
             }
+          }
+        }
 
-            let bestPixels = res.pixels;
-            let bestValue = cand.value;
+        accepted.push({
+          selector: cand.selector,
+          property: cand.property,
+          value: bestValue,
+          source: cand.source,
+          gainPixels: currentPixels - bestPixels,
+        });
+        currentPixels = bestPixels;
+        acceptedThisPass++;
+        progress(
+          `pass ${passes}: ${cand.selector} { ${cand.property}: ${bestValue} } → ${formatRatio(currentPixels / objective.totalPixels)}`,
+        );
+        return budgetHit ? "budget" : true;
+      };
 
-            // Greedy numeric line search around the accepted value.
-            if (cand.numeric) {
-              for (const refined of refinementValues(cand.numeric.base, cand.numeric.unit)) {
-                if (evals >= maxEvals || Date.now() - startedAt > budgetMs) {
-                  budgetHit = true;
-                  break;
-                }
-                const r = await trialCandidate(ctx, bestPixels, cand.selector, cand.property, refined);
-                evals++;
-                if (r.accepted) {
-                  bestPixels = r.pixels;
-                  bestValue = refined;
-                }
-              }
-            }
+      for (const family of FAMILY_ORDER) {
+        // Containers without a region of their own get geometry candidates
+        // derived from their children's offsets (padding, gap) — one parent
+        // fix instead of N per-child margins the greedy loop can't always
+        // accept individually.
+        const perElement = matched.map((m) => ({
+          m,
+          cands:
+            family === "geometry" && !m.region
+              ? [...containerCandidates(m, matched), ...candidatesFor(m, family, candidateCtx)]
+              : candidatesFor(m, family, candidateCtx),
+        }));
 
-            accepted.push({
-              selector: cand.selector,
-              property: cand.property,
-              value: bestValue,
-              source: cand.source,
-              gainPixels: currentPixels - bestPixels,
-            });
-            currentPixels = bestPixels;
-            acceptedThisPass++;
-            progress(
-              `pass ${passes}: ${cand.selector} { ${cand.property}: ${bestValue} } → ${formatRatio(currentPixels / objective.totalPixels)}`,
-            );
-            if (budgetHit) break outer;
+        // Shared-rule candidates first: when several same-class elements agree
+        // on a fix, one `td { … }` rule beats N nth-of-type patches — fewer
+        // trials and a patch agents can fold into their stylesheet directly.
+        const groups = groupCandidates(
+          perElement.flatMap(({ m, cands }) => cands.map((candidate) => ({ element: m.element, candidate }))),
+        );
+        const groupFixed = new Set<string>();
+        for (const cand of groups) {
+          const outcome = await trialOne(cand);
+          if (outcome === "budget") break outer;
+          if (outcome) groupFixed.add(`${cand.selector}|${cand.property}`);
+        }
+
+        for (const { m, cands } of perElement) {
+          const gs = groupSelectorOf(m.element);
+          for (const cand of cands) {
+            if (gs && groupFixed.has(`${gs}|${cand.property}`)) continue;
+            const outcome = await trialOne(cand);
+            if (outcome === "budget") break outer;
           }
         }
       }

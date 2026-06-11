@@ -47,12 +47,21 @@ function median(values: number[]): number | null {
   return sorted[Math.floor(sorted.length / 2)] ?? null;
 }
 
-export function candidatesFor(m: MatchedElement, family: Family): Candidate[] {
+export interface CandidateContext {
+  /** Dominant reference color under a CSS-px bounds (pixel-sampled, exact hex). */
+  sampleFill?: (bounds: Bounds) => string | null;
+}
+
+export function candidatesFor(
+  m: MatchedElement,
+  family: Family,
+  ctx: CandidateContext = {},
+): Candidate[] {
   switch (family) {
     case "geometry":
       return geometryCandidates(m);
     case "color":
-      return colorCandidates(m);
+      return colorCandidates(m, ctx);
     case "typography":
       return typographyCandidates(m);
     case "effects":
@@ -63,7 +72,7 @@ export function candidatesFor(m: MatchedElement, family: Family): Candidate[] {
 function geometryCandidates(m: MatchedElement): Candidate[] {
   const out: Candidate[] = [];
   const region = m.region;
-  if (!region) return out;
+  if (!region) return textAnchoredGeometry(m);
   const { selector, bounds, styles } = withElement(m);
 
   const dw = region.bounds.width - bounds.width;
@@ -140,13 +149,67 @@ function geometryCandidates(m: MatchedElement): Candidate[] {
   return out;
 }
 
-function colorCandidates(m: MatchedElement): Candidate[] {
+/**
+ * Geometry for elements with no matched region but with matched reference
+ * text: shift the element so its text lands where the reference's text sits.
+ * The seed only needs to be near — the trial + line search settle the value.
+ */
+function textAnchoredGeometry(m: MatchedElement): Candidate[] {
   const out: Candidate[] = [];
-  const { selector, styles } = withElement(m);
+  if (!m.textBlocks.length || !m.element.text) return out;
+  const { selector, bounds, styles } = withElement(m);
+
+  const dx = median(m.textBlocks.map((t) => t.bounds.x - bounds.x));
+  const dy = median(m.textBlocks.map((t) => t.bounds.y - bounds.y));
+  const SANITY_PX = 64;
+
+  if (dx != null && Math.abs(dx) > GEOMETRY_THRESHOLD_PX && Math.abs(dx) <= SANITY_PX) {
+    const ml = parsePx(styles.marginLeft) ?? 0;
+    out.push({
+      selector,
+      property: "margin-left",
+      value: `${ml + dx}px`,
+      source: "geometry:text-anchor-x",
+      numeric: { base: ml + dx, unit: "px" },
+    });
+  }
+  if (dy != null && Math.abs(dy) > GEOMETRY_THRESHOLD_PX && Math.abs(dy) <= SANITY_PX) {
+    const mt = parsePx(styles.marginTop) ?? 0;
+    out.push({
+      selector,
+      property: "margin-top",
+      value: `${mt + dy}px`,
+      source: "geometry:text-anchor-y",
+      numeric: { base: mt + dy, unit: "px" },
+    });
+  }
+  return out;
+}
+
+const MIN_SAMPLE_AREA_PX = 600;
+
+function colorCandidates(m: MatchedElement, ctx: CandidateContext): Candidate[] {
+  const out: Candidate[] = [];
+  const { selector, bounds, styles } = withElement(m);
+  const mine = rgbToHex(styles.backgroundColor);
+
+  // Pixel-sampled surface color beats extract's quantized fill — exact hex from
+  // the reference pixels under this element's own footprint.
+  let sampled: string | null = null;
+  if (ctx.sampleFill && m.element.area >= MIN_SAMPLE_AREA_PX) {
+    sampled = ctx.sampleFill(bounds);
+    if (sampled && mine && !sameColor(mine, sampled)) {
+      out.push({
+        selector,
+        property: "background-color",
+        value: sampled.toUpperCase(),
+        source: "color:ref-pixels",
+      });
+    }
+  }
 
   const refFill = m.region?.fill ?? null;
-  if (refFill) {
-    const mine = rgbToHex(styles.backgroundColor);
+  if (refFill && (!sampled || !sameColor(refFill, sampled))) {
     if (mine && !sameColor(mine, refFill)) {
       out.push({
         selector,
@@ -238,6 +301,73 @@ function effectsCandidates(m: MatchedElement): Candidate[] {
     }
   }
 
+  return out;
+}
+
+/** Bare-tag selectors that are safe to group without a class. */
+const GROUPABLE_BARE_TAGS = new Set(["td", "th", "tr", "li", "dt", "dd"]);
+const SAFE_CLASS = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
+const GROUP_NUMERIC_SPREAD_PX = 4;
+
+/** Shared-rule selector for an element (e.g. "span.avatar", "td"), or null. */
+export function groupSelectorOf(el: { tag: string; classes: string[] }): string | null {
+  const classes = el.classes.filter((c) => SAFE_CLASS.test(c));
+  if (classes.length !== el.classes.length) return null; // unsafe class name present
+  if (classes.length) return `${el.tag}.${classes.join(".")}`;
+  return GROUPABLE_BARE_TAGS.has(el.tag) ? el.tag : null;
+}
+
+/**
+ * Merge per-element candidates that agree across same-class elements into one
+ * shared-rule candidate (e.g. 5 td cells each proposing ~14px padding-top →
+ * `td { padding-top: 14px }`). One root-cause rule beats N nth-of-type patches:
+ * fewer trials, and a patch the agent can fold into its stylesheet directly.
+ */
+export function groupCandidates(
+  items: Array<{ element: { tag: string; classes: string[] }; candidate: Candidate }>,
+): Candidate[] {
+  const buckets = new Map<string, { selector: string; property: string; source: string; values: string[]; numerics: number[]; unit: string | null }>();
+  for (const { element, candidate } of items) {
+    const groupSelector = groupSelectorOf(element);
+    if (!groupSelector) continue;
+    const key = `${groupSelector}|${candidate.property}`;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { selector: groupSelector, property: candidate.property, source: candidate.source, values: [], numerics: [], unit: null };
+      buckets.set(key, bucket);
+    }
+    bucket.values.push(candidate.value);
+    if (candidate.numeric) {
+      bucket.numerics.push(candidate.numeric.base);
+      bucket.unit = candidate.numeric.unit;
+    }
+  }
+
+  const out: Candidate[] = [];
+  for (const bucket of buckets.values()) {
+    if (bucket.values.length < 2) continue;
+    if (bucket.numerics.length === bucket.values.length && bucket.unit) {
+      const sorted = [...bucket.numerics].sort((a, b) => a - b);
+      if (sorted[sorted.length - 1]! - sorted[0]! > GROUP_NUMERIC_SPREAD_PX) continue;
+      const med = median(bucket.numerics)!;
+      out.push({
+        selector: bucket.selector,
+        property: bucket.property,
+        value: `${med}${bucket.unit}`,
+        source: `${bucket.source}:grouped`,
+        numeric: { base: med, unit: bucket.unit },
+      });
+    } else {
+      const first = bucket.values[0]!;
+      if (!bucket.values.every((v) => v === first)) continue;
+      out.push({
+        selector: bucket.selector,
+        property: bucket.property,
+        value: first,
+        source: `${bucket.source}:grouped`,
+      });
+    }
+  }
   return out;
 }
 

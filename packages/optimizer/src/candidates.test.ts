@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { candidatesFor, containerCandidates, refinementValues, rgbToHex } from "./candidates.js";
+import { candidatesFor, containerCandidates, groupCandidates, refinementValues, rgbToHex } from "./candidates.js";
 import type { MatchedElement } from "./types.js";
 
 function matched(overrides: {
@@ -12,6 +12,7 @@ function matched(overrides: {
     element: {
       selector: ".target",
       tag: "div",
+      classes: ["target"],
       bounds: overrides.bounds ?? { x: 0, y: 0, width: 100, height: 50 },
       area: 5000,
       depth: 2,
@@ -150,6 +151,7 @@ describe("containerCandidates", () => {
       element: {
         selector: ".content",
         tag: "div",
+        classes: ["content"],
         bounds: { x: 0, y: 56, width: 900, height: 500 },
         area: 450000,
         depth: 1,
@@ -163,7 +165,7 @@ describe("containerCandidates", () => {
   }
   function child(selector: string, bounds: { x: number; y: number; width: number; height: number }, region: { x: number; y: number; width: number; height: number }): MatchedElement {
     return {
-      element: { selector, tag: "div", bounds, area: bounds.width * bounds.height, depth: 3, text: null, styles: {} },
+      element: { selector, tag: "div", classes: [], bounds, area: bounds.width * bounds.height, depth: 3, text: null, styles: {} },
       region: { id: selector, bounds: region, fill: null, borderRadius: null },
       textBlocks: [],
       iou: 0.8,
@@ -202,5 +204,108 @@ describe("containerCandidates", () => {
       child(".far", { x: 0, y: 2000, width: 100, height: 100 }, { x: 50, y: 2050, width: 100, height: 100 }),
     ];
     expect(containerCandidates(container(), kids)).toEqual([]);
+  });
+});
+
+describe("candidatesFor — pixel-sampled color", () => {
+  it("targets the sampled reference color under the element when it differs", () => {
+    const m = matched({ region: null });
+    const c = candidatesFor(m, "color", { sampleFill: () => "#1C1D26" });
+    const bg = c.find((x) => x.property === "background-color");
+    expect(bg?.value).toBe("#1C1D26");
+    expect(bg?.source).toBe("color:ref-pixels");
+  });
+
+  it("emits nothing when the sample matches the computed background", () => {
+    const m = matched({ region: null });
+    expect(candidatesFor(m, "color", { sampleFill: () => "#112233" })).toEqual([]);
+  });
+
+  it("dedupes the sampled color against the extract fill", () => {
+    const m = matched({ region: { id: "r1", bounds: { x: 0, y: 0, width: 100, height: 50 }, fill: "#1C1D26", borderRadius: null } });
+    const c = candidatesFor(m, "color", { sampleFill: () => "#1C1D26" });
+    expect(c.filter((x) => x.property === "background-color").length).toBe(1);
+  });
+});
+
+describe("candidatesFor — text-anchored geometry", () => {
+  it("proposes margin shifts from the offset between element and reference text", () => {
+    const m = matched({
+      region: null,
+      bounds: { x: 100, y: 100, width: 200, height: 20 },
+      textBlocks: [
+        { text: "Sample", bounds: { x: 92, y: 94, width: 60, height: 14 }, fontSize: 14, fontWeight: 400, color: null },
+      ],
+    });
+    const c = candidatesFor(m, "geometry");
+    expect(c.find((x) => x.property === "margin-left")?.value).toBe("-8px");
+    expect(c.find((x) => x.property === "margin-top")?.value).toBe("-6px");
+  });
+
+  it("proposes nothing when reference text aligns with the element", () => {
+    const m = matched({
+      region: null,
+      bounds: { x: 100, y: 100, width: 200, height: 20 },
+      textBlocks: [
+        { text: "Sample", bounds: { x: 101, y: 100, width: 60, height: 14 }, fontSize: 14, fontWeight: 400, color: null },
+      ],
+    });
+    expect(candidatesFor(m, "geometry")).toEqual([]);
+  });
+});
+
+describe("groupCandidates", () => {
+  function item(selector: string, tag: string, classes: string[], property: string, value: string, numeric?: { base: number; unit: string }) {
+    return {
+      element: { selector, tag, classes, bounds: { x: 0, y: 0, width: 50, height: 20 }, area: 1000, depth: 4, text: null, styles: {} },
+      candidate: { selector, property, value, source: "geometry:test", numeric },
+    };
+  }
+
+  it("merges near-identical numeric fixes on same-class elements into one rule", () => {
+    const groups = groupCandidates([
+      item("tr:nth-of-type(1) > td:nth-of-type(1)", "td", [], "padding-top", "13px", { base: 13, unit: "px" }),
+      item("tr:nth-of-type(2) > td:nth-of-type(1)", "td", [], "padding-top", "14px", { base: 14, unit: "px" }),
+      item("tr:nth-of-type(3) > td:nth-of-type(1)", "td", [], "padding-top", "14px", { base: 14, unit: "px" }),
+    ]);
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.selector).toBe("td");
+    expect(groups[0]!.value).toBe("14px");
+    expect(groups[0]!.source).toContain("grouped");
+  });
+
+  it("merges identical color fixes by class", () => {
+    const groups = groupCandidates([
+      item("tr:nth-of-type(1) > span.avatar", "span", ["avatar"], "background-color", "#1C1D26"),
+      item("tr:nth-of-type(2) > span.avatar", "span", ["avatar"], "background-color", "#1C1D26"),
+    ]);
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.selector).toBe("span.avatar");
+    expect(groups[0]!.value).toBe("#1C1D26");
+  });
+
+  it("does not group a single element, divergent values, or unsafe class names", () => {
+    expect(groupCandidates([item("a.x", "a", ["x"], "color", "#FFF")]).length).toBe(0);
+    expect(
+      groupCandidates([
+        item("tr:nth-of-type(1) > td", "td", [], "padding-top", "4px", { base: 4, unit: "px" }),
+        item("tr:nth-of-type(2) > td", "td", [], "padding-top", "30px", { base: 30, unit: "px" }),
+      ]).length,
+    ).toBe(0);
+    expect(
+      groupCandidates([
+        item("div.a", "div", ["weird:cls"], "color", "#FFF"),
+        item("div.b", "div", ["weird:cls"], "color", "#FFF"),
+      ]).length,
+    ).toBe(0);
+  });
+
+  it("groups divs only by class, never bare", () => {
+    expect(
+      groupCandidates([
+        item("div:nth-of-type(1)", "div", [], "color", "#FFF"),
+        item("div:nth-of-type(2)", "div", [], "color", "#FFF"),
+      ]).length,
+    ).toBe(0);
   });
 });
