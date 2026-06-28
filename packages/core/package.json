@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./tokens": "./src/tokens.ts",
+    "./style-system": "./src/style-system.ts",
     "./tailwind": "./src/tailwind.ts",
     "./overlay": "./src/overlay.ts"
   }

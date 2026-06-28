@@ -101,12 +101,51 @@ describe("tool arg building", () => {
     ]);
   });
 
+  it("tokens maps emit to --emit", () => {
+    expect(byName("tokens").build({ image_path: "/a.png", emit: "shadcn" }).cliArgs).toEqual([
+      "tokens",
+      "/a.png",
+      "--json",
+      "--emit",
+      "shadcn",
+    ]);
+  });
+
+  it("style_check maps a URL/HTML/image new-UI arg and optional flags", () => {
+    const { command, cliArgs } = byName("style_check").build({
+      reference_path: "/ref.png",
+      implementation: "http://localhost:3000",
+      reference_dpr: 2,
+      disable_ocr: true,
+    });
+    expect(command).toBe("style-check");
+    expect(cliArgs).toEqual([
+      "style-check",
+      "/ref.png",
+      "http://localhost:3000",
+      "--json",
+      "--reference-dpr",
+      "2",
+      "--no-ocr",
+    ]);
+  });
+
+  it("style_check defaults to just the two positional args + --json", () => {
+    expect(byName("style_check").build({ reference_path: "/ref.png", implementation: "/build.html" }).cliArgs).toEqual([
+      "style-check",
+      "/ref.png",
+      "/build.html",
+      "--json",
+    ]);
+  });
+
   it("exposes exactly the expected tools", () => {
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "compare",
       "converge",
       "extract",
       "plan",
+      "style_check",
       "suggest_fixes",
       "tokens",
     ]);

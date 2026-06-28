@@ -13,6 +13,8 @@ screenshots and compare your implementations against them.
 - The user provides a screenshot or mockup and asks you to build it
 - The user wants to compare their implementation against a design
 - The user wants to iteratively refine a UI to match a reference
+- The user wants a *different* UI that copies the **style/aesthetic** of a
+  screenshot (same design language, different content) — see "Style transfer" below
 
 ## Workflow
 
@@ -141,6 +143,28 @@ Query endpoints over HTTP while you edit:
 
 Save your HTML file; the server auto-reloads the page in ~120ms. Every edit
 yields a measurable mismatch delta — this is the fastest path to convergence.
+
+## Style transfer (copy the aesthetic, not the pixels)
+
+Use this when the target is a *new* screen in the same design language — not a
+pixel reproduction of the reference. Don't use `compare`/`converge` here; there's
+no pixel oracle when the layout differs.
+
+1. **Extract the system:** `one-shot-ui tokens <ref.png> --json` → a `styleSystem`:
+   palette split into `neutrals` vs `accents`, `spacing.baseUnit`, `typography`
+   (size scale + modular `ratio`), and named `radius`/`elevation` scales. Use
+   `--emit shadcn` or `--emit tailwind` for paste-ready variables.
+2. **You own the judgment calls.** The tool reports measured facts only — it does
+   **not** name semantic color roles (primary/accent/surface/border) or classify
+   mood. Look at the screenshot and assign those yourself; that's the part a vision
+   model (you) does better than pixel measurement.
+3. **Build** the new UI from those values.
+4. **Verify conformance:** `one-shot-ui style-check <ref.png> <your-build> --json`.
+   The new build should be an http(s) URL or HTML file (measured from real computed
+   CSS — exact) or a screenshot (lossy fallback). Output: per-dimension verdicts.
+   `palette`/`spacing`/`typography` drive `conforms`; `radius`/`elevation` are
+   advisory when the reference is a screenshot (a raster can't reliably ground
+   them). Fix the drifts it reports and re-run until `conforms: true`.
 
 ## Output Parsing
 

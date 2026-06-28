@@ -127,19 +127,60 @@ const suggestFixes: ToolSpec = {
 
 const tokens: ToolSpec = {
   name: "tokens",
-  title: "Extract design tokens from a screenshot",
+  title: "Extract design tokens + a reusable style system from a screenshot",
   description:
-    "Extract design tokens (color palette, spacing scale, radii) from a reference screenshot. " +
+    "Extract the design language of a reference screenshot: the flat `tokens` list (colors, spacing, radii, " +
+    "font sizes/weights, shadows) PLUS a structured `styleSystem` — palette split into neutrals vs accents, " +
+    "the base spacing unit, the type-size scale and its modular ratio, named radius and elevation scales. " +
+    "Use this to copy a UI's *style/aesthetic* onto new content. The values are measured deterministically; it " +
+    "deliberately does NOT name semantic color roles (primary/accent/surface) or classify mood — assign those " +
+    "yourself from the image. Pass `emit` to get paste-ready shadcn CSS variables or a Tailwind @theme block. " +
     "Input is an image file path.",
   inputSchema: {
     image_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the screenshot to analyze."),
-    disable_ocr: z.boolean().optional().describe("Skip OCR text extraction. OCR runs by default and roughly doubles latency; disable it when you don't need text content or typography (note: extract then returns empty fontSizes)."),
-    dpr: z.number().positive().optional().describe("Device pixel ratio of the screenshot (pass 2 for a Retina/Mac capture). When set, spacing/font-size/radius tokens are returned in CSS pixels instead of raw image pixels. Auto-detected when omitted."),
+    emit: z.enum(["json", "shadcn", "tailwind"]).optional().describe("Instead of the token list, emit the full style system as paste-ready output: 'shadcn' (CSS custom properties with role TODOs), 'tailwind' (@theme block), or 'json'."),
+    disable_ocr: z.boolean().optional().describe("Skip OCR text extraction. OCR runs by default and roughly doubles latency; disable it when you don't need text content or typography (note: type scale is then empty)."),
+    dpr: z.number().positive().optional().describe("Device pixel ratio of the screenshot (pass 2 for a Retina/Mac capture). When set, spacing/font-size/radius values are returned in CSS pixels instead of raw image pixels. Auto-detected when omitted."),
   },
   build(a) {
     return {
       command: "tokens",
-      cliArgs: ["tokens", String(a.image_path), "--json", ...flag(a.disable_ocr, "--no-ocr"), ...flag(a.dpr, "--dpr", String(a.dpr))],
+      cliArgs: ["tokens", String(a.image_path), "--json", ...flag(a.emit, "--emit", String(a.emit)), ...flag(a.disable_ocr, "--no-ocr"), ...flag(a.dpr, "--dpr", String(a.dpr))],
+    };
+  },
+};
+
+const styleCheck: ToolSpec = {
+  name: "style_check",
+  title: "Check a new UI conforms to a reference's design language (style transfer)",
+  description:
+    "Deterministically check whether a NEW build adopts the design LANGUAGE of a reference screenshot — palette, " +
+    "spacing rhythm, type scale, roundedness, elevation — rather than reproducing it pixel-for-pixel. Use this when " +
+    "copying the *style/aesthetic* of a screenshot onto different content or layout (contrast with `compare`/`converge`, " +
+    "which pixel-match the SAME screen). The reference is always a screenshot; the new build is measured from real " +
+    "computed CSS when you pass an http(s) URL or an HTML file (exact), or from a screenshot as a lossy fallback. " +
+    "Returns per-dimension verdicts: palette/spacing/typography drive pass/fail (high confidence); radius/elevation " +
+    "are advisory when the reference is a raster, since a screenshot can't reliably ground them. It reports drift only — " +
+    "it never assigns semantic color roles or mood; decide those yourself from the image.",
+  inputSchema: {
+    reference_path: z.string().describe("Path (absolute, or relative to the server's launch directory) to the reference (design) screenshot whose style to conform to."),
+    implementation: z.string().describe("The new build to check: an http(s) URL or an HTML file path (DOM-measured, exact), or a screenshot path (lossy raster fallback)."),
+    reference_dpr: z.number().positive().optional().describe("DPR of the reference screenshot (pass 2 for a Retina/Mac capture). Auto-detected when omitted."),
+    dpr: z.number().positive().optional().describe("DPR of the new-UI screenshot, when it is an image. Auto-detected when omitted."),
+    disable_ocr: z.boolean().optional().describe("Skip OCR on screenshot inputs (disables the type-scale comparison)."),
+  },
+  build(a) {
+    return {
+      command: "style-check",
+      cliArgs: [
+        "style-check",
+        String(a.reference_path),
+        String(a.implementation),
+        "--json",
+        ...flag(a.reference_dpr, "--reference-dpr", String(a.reference_dpr)),
+        ...flag(a.dpr, "--dpr", String(a.dpr)),
+        ...flag(a.disable_ocr, "--no-ocr"),
+      ],
     };
   },
 };
@@ -202,7 +243,7 @@ const convergeTool: ToolSpec = {
   },
 };
 
-export const TOOLS: ToolSpec[] = [compare, extract, suggestFixes, tokens, plan, convergeTool];
+export const TOOLS: ToolSpec[] = [compare, extract, suggestFixes, tokens, plan, convergeTool, styleCheck];
 
 /** Tool args whose values must point at an existing file before the CLI is spawned. */
 export const REQUIRED_FILE_ARGS = new Set(["reference_path", "implementation_path", "image_path"]);

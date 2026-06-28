@@ -15,6 +15,7 @@ import {
 import { detectBackgroundColor, loadImage } from "@one-shot-ui/image-io";
 
 export * from "./spacing.js";
+export * from "./style-conformance.js";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { detectLayoutBoxes, measureSpacing } from "@one-shot-ui/vision-layout";
 import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";

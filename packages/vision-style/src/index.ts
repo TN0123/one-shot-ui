@@ -50,6 +50,68 @@ export function extractDominantColors(image: ImageAsset, limit = 8): ColorSwatch
     });
 }
 
+/**
+ * Find the most-used SATURATED colors, regardless of how little area they cover.
+ * `extractDominantColors` is area-weighted, so a brand accent on a few small elements
+ * (a violet CTA, a status badge) never makes the top list — yet it's the most
+ * identity-defining color. This filters to high-chroma pixels first, then ranks within
+ * that subset, surfacing the accents area-weighting drops. Neutrals/surfaces (low
+ * saturation) are excluded by design.
+ */
+export function extractAccentColors(image: ImageAsset, limit = 6, minSaturation = 0.4): ColorSwatch[] {
+  const buckets = new Map<string, Bucket>();
+  let sampleCount = 0;
+
+  for (let y = 0; y < image.height; y += 2) {
+    for (let x = 0; x < image.width; x += 2) {
+      const offset = (y * image.width + x) * image.channels;
+      const alpha = image.data[offset + 3] ?? 255;
+      if (alpha < 16) continue;
+      const r = image.data[offset] ?? 0;
+      const g = image.data[offset + 1] ?? 0;
+      const b = image.data[offset + 2] ?? 0;
+      if (saturation(r, g, b) < minSaturation) continue;
+      const key = `${quantize(r)}:${quantize(g)}:${quantize(b)}`;
+      const bucket = buckets.get(key) ?? { r: 0, g: 0, b: 0, population: 0 };
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+      bucket.population += 1;
+      buckets.set(key, bucket);
+      sampleCount += 1;
+    }
+  }
+
+  // Require a minimum presence WITHIN the accent subset so anti-aliasing fringe
+  // pixels don't register as colors of their own.
+  const minPopulation = Math.max(8, sampleCount * 0.02);
+  return [...buckets.values()]
+    .filter((bucket) => bucket.population >= minPopulation)
+    .sort((a, b) => b.population - a.population)
+    .slice(0, limit)
+    .map((bucket) => {
+      const r = Math.round(bucket.r / bucket.population);
+      const g = Math.round(bucket.g / bucket.population);
+      const b = Math.round(bucket.b / bucket.population);
+      return {
+        hex: rgbToHex(r, g, b),
+        rgb: { r, g, b },
+        population: bucket.population,
+        ratio: sampleCount === 0 ? 0 : bucket.population / sampleCount
+      };
+    });
+}
+
+/** HSL saturation on a 0–255 scale, 0 (gray) … 1 (vivid). */
+function saturation(r: number, g: number, b: number): number {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  if (d === 0) return 0;
+  const l = (max + min) / 2;
+  return l <= 127.5 ? d / (max + min) : d / (510 - max - min);
+}
+
 function quantize(value: number): number {
   return Math.min(255, Math.max(0, Math.round(value / 16) * 16));
 }

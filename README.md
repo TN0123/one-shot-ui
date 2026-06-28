@@ -5,7 +5,7 @@
 ### Catch what the eye can't.
 
 **Deterministic screenshot diffing for AI coding agents.**
-Turn a reference screenshot into structured data, diff any build against it — pixel, layout, color, and type — then get the exact CSS to fix.
+Turn a reference screenshot into structured data, diff any build against it — pixel, layout, color, and type — then get the exact CSS to fix. Or copy a UI's **design language** onto a brand-new screen.
 
 [![npm version](https://img.shields.io/npm/v/one-shot-ui?color=8b7cf6&label=npm)](https://www.npmjs.com/package/one-shot-ui)
 [![license](https://img.shields.io/npm/l/one-shot-ui?color=8b7cf6)](./LICENSE)
@@ -45,6 +45,20 @@ The `run` command loops **extract → capture → compare → fix** until the he
 - **Structural, not just pixels.** Detects missing/extra elements, position & size shifts, color, shadow, spacing, and typography — and labels which differences are *irreducible* (anti-aliasing, photographic content) so agents don't chase ghosts.
 - **Agent-native.** Ships an `AGENTS.md` (auto-discovered by Claude Code, Cursor, Codex, …) plus a Claude Code skill, so your agent drives it without hand-holding.
 - **Local & private.** Pixel diffing, OCR, and layout extraction all run on your machine. No images leave your box, no API keys.
+
+## Copy a UI's *style*, not just match it
+
+Matching a screenshot pixel-for-pixel is one job. The other: building a **different** screen that feels like it belongs to the same design system. `one-shot-ui` extracts the *design language* from a reference and verifies a new UI conforms to it — deterministically, with no pixel oracle to lean on.
+
+```sh
+# Extract a reusable style system — palette, spacing scale, type ratio, radii, elevation
+one-shot-ui tokens reference.png --emit shadcn      # or: tailwind | json
+
+# Build a different screen in that style, then check it conforms
+one-shot-ui style-check reference.png ./pricing.html
+```
+
+It reports measured facts and leaves the taste to the agent: it won't name your "primary" color or classify the mood — you decide those from the image (you're the vision model; the tool is your exact, hallucination-free eyes). Conformance is judged on what a screenshot grounds reliably — palette, spacing rhythm, type scale — while roundedness and elevation are flagged as advisories, since a raster can't pin them down.
 
 ## Install
 
@@ -91,8 +105,8 @@ mkdir -p .claude/skills/one-shot-ui && cp "$(npm root -g)/one-shot-ui/skill/SKIL
 
 `one-shot-ui` also runs as a local [MCP](https://modelcontextprotocol.io) server, so any
 MCP-capable agent (Claude Code, Cursor, Cline, Windsurf, VS Code) can call `compare`,
-`suggest_fixes`, `extract`, `tokens`, and `plan` as tools — no shell glue. It runs over stdio,
-makes no network calls, and needs no API keys.
+`converge`, `suggest_fixes`, `extract`, `tokens`, `plan`, and `style_check` as tools — no shell
+glue. It runs over stdio, makes no network calls, and needs no API keys.
 
 ```sh
 claude mcp add one-shot-ui -- npx -y one-shot-ui mcp
@@ -119,7 +133,8 @@ See [docs/MCP.md](./docs/MCP.md) for per-client setup and registry publishing.
 |---------|---------|-----------|
 | `extract` | Analyze a screenshot into layout, color, and text data | `--json`, `--no-ocr`, `--overlay`, `--fine` |
 | `compare` | Pixel + structural diff between two screenshots | `--json`, `--heatmap`, `--dom-diff` |
-| `tokens` | Extract design tokens (colors, spacing, radii) | `--json` |
+| `tokens` | Design tokens + a reusable style system (palette, spacing, type, radii) | `--json`, `--emit shadcn\|tailwind\|json` |
+| `style-check` | Check a new UI conforms to a reference's design language | `--json` (new UI = URL / HTML / screenshot) |
 | `plan` | Generate an implementation strategy | `--json` |
 | `capture` | Screenshot a URL or local HTML file | `--url`, `--file`, `--output` |
 | `suggest-fixes` | Tailwind/CSS fix suggestions from a diff | `--json`, `--top`, `--dom-diff`, `--framework` |

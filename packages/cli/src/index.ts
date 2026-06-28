@@ -29,12 +29,13 @@ import {
   type LayoutNode
 } from "@one-shot-ui/core";
 import { generateDesignTokens } from "@one-shot-ui/core/tokens";
+import { buildStyleSystem, emitStyleSystem, aggregateComputedStyles, type StyleEmitFormat } from "@one-shot-ui/core/style-system";
 import { captureScreenshot, BlankCaptureError } from "@one-shot-ui/browser-capture";
-import { compareImages, compareRulers, type CompareImagesOptions, type SpacingIssue } from "@one-shot-ui/diff-engine";
+import { compareImages, compareRulers, compareStyleSystems, type CompareImagesOptions, type SpacingIssue } from "@one-shot-ui/diff-engine";
 import { calculateActivePixelRatio, detectBackgroundColor, loadImage, readImageDimensions, estimateDpr, resolveDpr, applyDpr } from "@one-shot-ui/image-io";
 import { clusterComponents } from "@one-shot-ui/vision-components";
 import { buildLayoutHierarchy, detectLayoutBoxes, detectLayoutBoxesFine, detectLayoutStrategy, measureSpacing, measureRulers, type RulerReport } from "@one-shot-ui/vision-layout";
-import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors } from "@one-shot-ui/vision-style";
+import { detectGradient, detectShadow, estimateBorderRadius, estimateNodeFill, extractDominantColors, extractAccentColors } from "@one-shot-ui/vision-style";
 import { extractText } from "@one-shot-ui/vision-text";
 import { labelNodes } from "@one-shot-ui/semantic-label";
 import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
@@ -129,6 +130,27 @@ function estimateTextInkColor(
     return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
   }
   return null;
+}
+
+/**
+ * Enrich a screenshot report's dominant colors with saturation-extracted brand accents
+ * (small high-chroma colors that area-weighted dominant extraction drops, e.g. a violet
+ * CTA on a dark page). Mutates report.colors in place. Accents are a bonus — on any
+ * failure the report is left untouched rather than blocking the command.
+ */
+async function addAccentColors(report: Awaited<ReturnType<typeof extractImageReport>>, imagePath: string): Promise<void> {
+  try {
+    const image = await loadImage(imagePath);
+    const accents = extractAccentColors(image);
+    const dist = (a: string, b: string) => {
+      const p = (h: string, i: number) => Number.parseInt(h.replace("#", "").slice(i, i + 2), 16) || 0;
+      return Math.abs(p(a, 0) - p(b, 0)) + Math.abs(p(a, 2) - p(b, 2)) + Math.abs(p(a, 4) - p(b, 4));
+    };
+    const extra = accents.filter((a) => !report.colors.some((c) => dist(c.hex, a.hex) < 24));
+    report.colors = [...report.colors, ...extra];
+  } catch {
+    /* accents are a bonus; never block the command */
+  }
 }
 
 /** Normalize a px-valued design token to CSS px for the given dpr; pass others through. */
@@ -659,6 +681,7 @@ program
   .command("tokens")
   .argument("<imagePath>", "Path to the reference screenshot")
   .option("--json", "Print full JSON report", false)
+  .option("--emit <format>", "Emit the extracted style system as: json | shadcn | tailwind (paste-ready, instead of the token list)")
   .option("--no-ocr", "Disable OCR text extraction")
   .option("--dpr <n>", "Device pixel ratio of the screenshot (e.g. 2 for Retina). Auto-detected when omitted; pass it to get CSS-pixel token values.")
   .action(async (imagePath, options) => {
@@ -668,15 +691,96 @@ program
       dpr: parseDprOption(options.dpr)
     });
     const dpr = report.scale?.dpr ?? 1;
+    await addAccentColors(report, imagePath);
+    const styleSystem = buildStyleSystem(report, { dpr, source: "screenshot" });
+
+    if (options.emit) {
+      const fmt = String(options.emit).toLowerCase();
+      if (fmt !== "json" && fmt !== "shadcn" && fmt !== "tailwind") {
+        console.error(`Error: --emit must be one of json | shadcn | tailwind (got "${options.emit}").`);
+        process.exit(1);
+      }
+      console.log(emitStyleSystem(styleSystem, fmt as StyleEmitFormat));
+      return;
+    }
+
     const tokens = generateDesignTokens(report).map((t) => ({ ...t, value: normalizeTokenValue(t, dpr) }));
     if (options.json) {
-      console.log(JSON.stringify({ version: VERSION, scale: report.scale, tokens }, null, 2));
+      console.log(JSON.stringify({ version: VERSION, scale: report.scale, tokens, styleSystem }, null, 2));
       return;
     }
 
     console.log(`Generated ${tokens.length} design tokens from ${report.image.path}${dpr > 1 ? ` (CSS px @ ${dpr}x)` : ""}`);
     for (const token of tokens) {
       console.log(`  ${token.name}: ${token.value} (used ${token.count}x)`);
+    }
+    const base = styleSystem.spacing.baseUnit;
+    console.log(`\nStyle system: ${styleSystem.colors.neutrals.length} neutrals, ${styleSystem.colors.accents.length} accents${base ? `, ${base}px spacing base` : ""}${styleSystem.typography.ratio ? `, type ratio ${styleSystem.typography.ratio}` : ""} (use --emit shadcn|tailwind for paste-ready vars, --json for the full system).`);
+  });
+
+program
+  .command("style-check")
+  .description("Check whether a NEW UI conforms to the design language of a reference screenshot (style transfer, not pixel match)")
+  .argument("<referencePath>", "Path to the reference (design) screenshot")
+  .argument("[newUi]", "The new build to check: an http(s) URL, an HTML file (DOM-measured, exact), or a screenshot (raster fallback)")
+  .option("--impl <path>", "The new build (alternative to the positional argument)")
+  .option("--json", "Print the JSON conformance report", false)
+  .option("--no-ocr", "Disable OCR text extraction on screenshot inputs")
+  .option("--reference-dpr <n>", "Device pixel ratio of the reference screenshot (e.g. 2 for Retina). Auto-detected when omitted.")
+  .option("--dpr <n>", "Device pixel ratio of the new-UI screenshot, when it is an image. Auto-detected when omitted.")
+  .action(async (referencePath, newUiArg, options) => {
+    const newUi = newUiArg ?? options.impl;
+    if (!newUi) {
+      console.error("Error: both a reference screenshot and a new UI are required.");
+      console.error("Usage: one-shot-ui style-check <reference.png> <http://localhost:3000 | build.html | build.png>");
+      process.exit(1);
+    }
+    assertInputExists("reference_path", referencePath);
+
+    // Reference: screenshot only (we just have a picture of it).
+    const refReport = await extractImageReport(referencePath, { disableOcr: options.ocr === false, dpr: parseDprOption(options.referenceDpr) });
+    const refDpr = refReport.scale?.dpr ?? 1;
+    await addAccentColors(refReport, referencePath);
+    const refSystem = buildStyleSystem(refReport, { dpr: refDpr, source: "screenshot" });
+
+    // New UI: DOM-preferred (URL or HTML file = exact computed CSS), screenshot fallback.
+    const isUrl = /^https?:\/\//i.test(newUi);
+    const useDom = isUrl || isHtmlInput(newUi);
+    let implSystem;
+    if (useDom) {
+      ensureChromium();
+      const cssWidth = Math.round(refReport.image.width / refDpr);
+      const cssHeight = Math.round(refReport.image.height / refDpr);
+      const domTree = await extractDomTree({
+        ...(isUrl ? { url: newUi } : { filePath: resolve(newUi) }),
+        width: cssWidth,
+        height: cssHeight,
+        deviceScaleFactor: 1,
+      });
+      implSystem = aggregateComputedStyles(domTree);
+    } else {
+      assertInputExists("implementation_path", newUi);
+      const implReport = await extractImageReport(newUi, { disableOcr: options.ocr === false, dpr: parseDprOption(options.dpr) });
+      await addAccentColors(implReport, newUi);
+      implSystem = buildStyleSystem(implReport, { dpr: implReport.scale?.dpr ?? 1, source: "screenshot" });
+    }
+
+    const conformance = compareStyleSystems(refSystem, implSystem);
+
+    if (options.json) {
+      console.log(JSON.stringify({ version: VERSION, referenceSource: "screenshot", implementationSource: implSystem.source, conformance }, null, 2));
+      return;
+    }
+
+    console.log(conformance.summary);
+    console.log(`(reference: screenshot, new UI: ${implSystem.source === "dom" ? "DOM/computed-CSS" : "screenshot"})`);
+    for (const dim of conformance.dimensions) {
+      const mark = dim.verdict === "match" ? "✓" : "✗";
+      console.log(`\n${mark} ${dim.name}`);
+      for (const drift of dim.drifts) console.log(`   - ${drift}`);
+    }
+    if (implSystem.source === "screenshot") {
+      console.log(`\nNote: the new UI was measured from a screenshot (lossy). Pass its HTML file or a localhost URL for exact, DOM-measured conformance.`);
     }
   });
 
@@ -1774,7 +1878,7 @@ program
 
 program
   .command("mcp")
-  .description("Run the one-shot-ui MCP server (stdio) so AI agents/clients can call compare, extract, suggest-fixes, tokens, and plan as tools")
+  .description("Run the one-shot-ui MCP server (stdio) so AI agents/clients can call compare, converge, extract, suggest-fixes, tokens, plan, and style-check as tools")
   .action(async () => {
     const { spawn } = await import("node:child_process");
     const { fileURLToPath } = await import("node:url");

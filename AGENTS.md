@@ -70,7 +70,8 @@ wrong with a UI implementation compared to a reference screenshot.
 | extract         | Analyze screenshot into layout/color/text  | --json, --no-ocr, --overlay, --fine|
 | converge        | Closed-loop pixel-verified CSS optimizer   | --impl, --out, --json, --budget-seconds, --reference-dpr |
 | compare         | Pixel + structural diff + spacing deltas   | --json, --heatmap, --spacing, --dom-diff |
-| tokens          | Extract design tokens                      | --json                             |
+| tokens          | Design tokens + reusable style system      | --json, --emit shadcn\|tailwind\|json |
+| style-check     | Does a NEW UI match a reference's style?   | --json, --reference-dpr (new UI = url\|html\|png) |
 | plan            | Generate implementation strategy           | --json                             |
 | capture         | Screenshot a URL, HTML, or .tsx file       | --url, --file, --output, --match-reference, --reference-dpr |
 | suggest-fixes   | Tailwind/CSS fix suggestions from diff     | --json, --top, --dom-diff, --framework |
@@ -80,8 +81,26 @@ wrong with a UI implementation compared to a reference screenshot.
 | benchmark       | Run benchmark suites                       | --json, --output                   |
 
 If your client speaks MCP, you can skip the CLI entirely: `one-shot-ui mcp` exposes
-`converge`, `compare`, `suggest_fixes`, `extract`, `tokens`, and `plan` as tools (stdio,
-local, no API keys). See `docs/MCP.md`.
+`converge`, `compare`, `suggest_fixes`, `extract`, `tokens`, `plan`, and `style_check`
+as tools (stdio, local, no API keys). See `docs/MCP.md`.
+
+## Copying a UI's style (not pixels)
+
+When the goal is to make a *different* screen feel like it belongs to the same design
+language as a reference — not to reproduce that exact screen — use the style workflow
+instead of `compare`/`converge`:
+
+1. **Extract the system:** `one-shot-ui tokens <ref.png> --json` returns a `styleSystem`
+   (palette split into neutrals vs accents, base spacing unit, type scale + ratio, named
+   radius/elevation scales). Or `--emit shadcn` / `--emit tailwind` for paste-ready vars.
+   The tool reports measured facts only — **you** assign semantic color roles
+   (primary/accent/surface) and judge the mood from the image; it never guesses those.
+2. **Build** your new UI using those values.
+3. **Verify conformance:** `one-shot-ui style-check <ref.png> <your-build>` where the
+   build is an http(s) URL or HTML file (measured from real computed CSS — exact) or a
+   screenshot (lossy fallback). It reports per-dimension drift; palette/spacing/typography
+   drive pass/fail, while radius/elevation are advisory when the reference is a screenshot
+   (a raster can't reliably ground them). Iterate until it conforms.
 
 ### `serve` endpoints (HTTP, default port 7777)
 

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.11.0 — style transfer: extract a design language, verify a new UI conforms
+
+Until now the tool answered one question: *does this build match this exact screen?*
+This release adds a second: *does this new UI belong to the same design language as this
+screenshot?* — for when an agent is copying a UI's **style/aesthetic** onto different
+content, not reproducing it pixel-for-pixel.
+
+The guiding constraint: the calling agent is already a vision model. So the tool does
+**not** classify mood, name semantic color roles, or call any VLM — it stays the
+deterministic, hallucination-free *eyes*, and leaves the judgment calls to the agent.
+
+### `tokens` now extracts a reusable `styleSystem`
+
+Alongside the flat token list, `tokens` returns a structured system: the palette split
+into neutrals vs accents (by saturation), the base spacing unit (chance-corrected grid
+detection), the type-size scale and its modular ratio, and named radius/elevation scales.
+Color roles are left unassigned and font family stays a low-confidence guess — those are
+the agent's call. `--emit shadcn` / `--emit tailwind` / `--emit json` print paste-ready
+variables (shadcn output scaffolds the role tokens as a TODO for the agent to fill).
+
+### `one-shot-ui style-check <ref.png> <new-ui>` (also the `style_check` MCP tool)
+
+The style-transfer analog of `compare`/`converge`: it diffs two extracted design
+*systems*, not pixels (there's no pixel oracle when the layout differs). The new UI is
+measured from **real computed CSS** when you pass an http(s) URL or HTML file (exact), or
+from a screenshot as a lossy fallback — the reference is always a screenshot.
+
+It is built to be honest about the screenshot↔DOM asymmetry: a screenshot yields a sparse,
+noisy view (misses small accents, under-detects radii, false-detects shadows on dark UIs),
+so comparing it value-for-value against an exact DOM would cry wolf on a faithful build.
+Instead:
+
+- **palette / spacing / typography** compare dominant *character* and drive the pass/fail
+  verdict (high confidence): a new dominant brand hue, an incompatible spacing rhythm
+  (a 4px grid is a harmonic of 8px — fine; a 5px rhythm is not), or a different type ratio.
+- **radius / elevation** are reported as **advisories** when the reference is a raster,
+  since a screenshot can't reliably ground them — they inform without failing the build.
+
+Verified against the bundled dashboard fixture: the HTML that generated the reference PNG
+**conforms** (with radius/elevation advisories), while off-brand palette and off-grid
+spacing builds **drift** on the high-confidence dimensions.
+
 ## 0.10.0 — `converge`: closed-loop pixel-verified CSS optimization
 
 The step change. Every release since 0.6 made the tool's *estimates* better, and agent
