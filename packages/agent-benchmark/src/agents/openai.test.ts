@@ -34,7 +34,7 @@ describe("createOpenAIAgent.generate", () => {
   });
 
   it("throws a clear error on a non-200 response", async () => {
-    globalThis.fetch = (async () => new Response("nope", { status: 401 })) as typeof fetch;
+    globalThis.fetch = (async () => new Response("nope", { status: 401 })) as unknown as typeof fetch;
     const agent = createOpenAIAgent({ model: "gpt-5.4-mini", apiKey: "bad" });
     await expect(agent.generate(tmpPng())).rejects.toThrow(/OpenAI/);
   });
