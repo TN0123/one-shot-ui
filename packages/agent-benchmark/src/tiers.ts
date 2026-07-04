@@ -30,6 +30,8 @@ export async function captureAndScore(
   const htmlPath = join(workDir, `${gated.id}.${label}.html`);
   const capturePath = join(workDir, `${gated.id}.${label}.png`);
   writeFileSync(htmlPath, html);
+  // Renders agent-produced (untrusted) HTML in headless Chromium; acceptable here since
+  // this is a dev-only benchmark of the user's own models against a benign corpus.
   await runCli([
     "capture", "--file", htmlPath, "--output", capturePath, "--match-reference", gated.refImagePath,
   ]);
@@ -62,21 +64,30 @@ export async function runTiers(
 
   // Tier 1 — K rounds of tool-fed revision.
   if (wanted.includes(1) || wanted.includes(2)) {
-    for (let round = 0; round < opts.k; round++) {
-      const feedbackJson = (await runCli([
-        "suggest-fixes", gated.refImagePath, best.capturePath, "--json",
-      ])).stdout;
-      const revised = await agent.revise({
-        refImagePath: gated.refImagePath,
-        currentImagePath: best.capturePath,
-        feedbackJson,
-        currentHtml: bestHtml,
-      });
-      const scored = await captureAndScore(revised, gated, workDir, `t1r${round}`, opts.ocr);
-      if (scored.score.visualScore >= best.score.visualScore) {
-        best = scored;
-        bestHtml = revised;
+    try {
+      for (let round = 0; round < opts.k; round++) {
+        const suggestArgs = ["suggest-fixes", gated.refImagePath, best.capturePath, "--json"];
+        if (!opts.ocr) suggestArgs.push("--no-ocr");
+        const suggestResult = await runCli(suggestArgs);
+        if (suggestResult.code !== 0) {
+          console.error(`suggest-fixes failed for ${gated.id} (round ${round}): exit code ${suggestResult.code}`);
+          break;
+        }
+        const feedbackJson = suggestResult.stdout;
+        const revised = await agent.revise({
+          refImagePath: gated.refImagePath,
+          currentImagePath: best.capturePath,
+          feedbackJson,
+          currentHtml: bestHtml,
+        });
+        const scored = await captureAndScore(revised, gated, workDir, `t1r${round}`, opts.ocr);
+        if (scored.score.visualScore >= best.score.visualScore) {
+          best = scored;
+          bestHtml = revised;
+        }
       }
+    } catch (err) {
+      console.error(`Tier-1 round failed for ${gated.id}: ${(err as Error).message}`);
     }
     if (wanted.includes(1)) {
       runs.push({ tier: 1, ...best.score, htmlPath: best.htmlPath, capturePath: best.capturePath });
@@ -85,17 +96,21 @@ export async function runTiers(
 
   // Tier 2 — deterministic converge on the best tier-1 HTML, scored with the same scorer.
   if (wanted.includes(2)) {
-    const patchPath = join(workDir, `${gated.id}.patch.css`);
-    const conv = parseCliJson(
-      await runCli(
-        ["converge", gated.refImagePath, "--impl", best.htmlPath, "--out", patchPath, "--json"],
-        { timeoutMs: 320_000 }, // converge's default budget is 300s; clear the 180s mcp runCli default
-      ),
-      "converge",
-    ) as { patchCss: string };
-    const t2Html = applyPatchCss(bestHtml, conv.patchCss);
-    const t2 = await captureAndScore(t2Html, gated, workDir, "t2", opts.ocr);
-    runs.push({ tier: 2, ...t2.score, htmlPath: t2.htmlPath, capturePath: t2.capturePath });
+    try {
+      const patchPath = join(workDir, `${gated.id}.patch.css`);
+      const conv = parseCliJson(
+        await runCli(
+          ["converge", gated.refImagePath, "--impl", best.htmlPath, "--out", patchPath, "--json"],
+          { timeoutMs: 320_000 }, // converge's default budget is 300s; clear the 180s mcp runCli default
+        ),
+        "converge",
+      ) as { patchCss: string };
+      const t2Html = applyPatchCss(bestHtml, conv.patchCss);
+      const t2 = await captureAndScore(t2Html, gated, workDir, "t2", opts.ocr);
+      runs.push({ tier: 2, ...t2.score, htmlPath: t2.htmlPath, capturePath: t2.capturePath });
+    } catch (err) {
+      console.error(`Tier-2 converge failed for ${gated.id}: ${(err as Error).message}`);
+    }
   }
 
   return runs;

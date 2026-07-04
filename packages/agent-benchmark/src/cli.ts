@@ -49,6 +49,29 @@ program
       gated.push(g);
     }
 
+    // Writes leaderboard.json + leaderboard.html from the results accumulated so far.
+    // Called after each case (and again at the end) so a mid-run kill loses at most one case.
+    const writeOutputs = () => {
+      const leaderboardJson = {
+        generatedNote: `Design2Code (${resolve(opts.corpusDir)})`,
+        cohortCounts: {
+          provable: gated.filter((g) => g.cohort === "provable").length,
+          unknown: gated.filter((g) => g.cohort === "unknown").length,
+        },
+        results,
+        stats: statsByAgentTier(results, "provable"), // per agent+tier mean/median (spec §5)
+        lift: liftByAgent(results, "provable"),
+      };
+      writeFileSync(join(outDir, "leaderboard.json"), JSON.stringify(leaderboardJson, null, 2));
+      writeFileSync(
+        join(outDir, "leaderboard.html"),
+        renderLeaderboard(leaderboardJson.lift, {
+          caseCount: leaderboardJson.cohortCounts.provable,
+          generatedNote: leaderboardJson.generatedNote,
+        }),
+      );
+    };
+
     const results: TierResult[] = [];
     for (const g of gated) {
       for (const agent of agents) {
@@ -66,26 +89,10 @@ program
           console.error(`  FAILED ${g.id} × ${agent.id}: ${(err as Error).message}`);
         }
       }
+      writeOutputs();
     }
 
-    const leaderboardJson = {
-      generatedNote: `Design2Code (${resolve(opts.corpusDir)})`,
-      cohortCounts: {
-        provable: gated.filter((g) => g.cohort === "provable").length,
-        unknown: gated.filter((g) => g.cohort === "unknown").length,
-      },
-      results,
-      stats: statsByAgentTier(results, "provable"), // per agent+tier mean/median (spec §5)
-      lift: liftByAgent(results, "provable"),
-    };
-    writeFileSync(join(outDir, "leaderboard.json"), JSON.stringify(leaderboardJson, null, 2));
-    writeFileSync(
-      join(outDir, "leaderboard.html"),
-      renderLeaderboard(leaderboardJson.lift, {
-        caseCount: leaderboardJson.cohortCounts.provable,
-        generatedNote: leaderboardJson.generatedNote,
-      }),
-    );
+    writeOutputs();
     console.error(`Wrote ${join(outDir, "leaderboard.json")} and leaderboard.html`);
   });
 
