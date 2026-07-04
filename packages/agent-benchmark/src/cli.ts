@@ -89,4 +89,7 @@ program
     console.error(`Wrote ${join(outDir, "leaderboard.json")} and leaderboard.html`);
   });
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).catch((err) => {
+  console.error((err as Error).message);
+  process.exit(1);
+});
