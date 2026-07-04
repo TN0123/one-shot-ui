@@ -26,7 +26,8 @@
       "@one-shot-ui/browser-capture": ["packages/browser-capture/src/index.ts"],
       "@one-shot-ui/semantic-label": ["packages/semantic-label/src/index.ts"],
       "@one-shot-ui/dom-diff": ["packages/dom-diff/src/index.ts"],
-      "@one-shot-ui/optimizer": ["packages/optimizer/src/index.ts"]
+      "@one-shot-ui/optimizer": ["packages/optimizer/src/index.ts"],
+      "@one-shot-ui/mcp/cli-runner": ["packages/mcp/src/cli-runner.ts"]
     }
   },
   "include": ["packages/**/*.ts", "packages/**/*.d.ts"]
