@@ -50,7 +50,8 @@
     "dev:extract": "bun packages/cli/src/index.ts extract",
     "dev:compare": "bun packages/cli/src/index.ts compare",
     "dev:capture": "bun packages/cli/src/index.ts capture",
-    "dev:benchmark": "bun packages/cli/src/index.ts benchmark"
+    "dev:benchmark": "bun packages/cli/src/index.ts benchmark",
+    "dev:agent-benchmark": "bun packages/agent-benchmark/src/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
