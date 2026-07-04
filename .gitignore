@@ -14,3 +14,4 @@ scratchpad/
 docs/*
 /one-shot-run/*
 PUBLISHING.md.bench/
+.env
