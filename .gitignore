@@ -13,5 +13,6 @@ IMPROVEMENTS.md
 scratchpad/
 docs/*
 /one-shot-run/*
-PUBLISHING.md.bench/
+PUBLISHING.md
+.bench/
 .env
