@@ -5,6 +5,7 @@
 // pure decision — "given the baseline, the current state, and the accepted fixes,
 // which fixes are the culprits?" — so it is unit-tested without a browser.
 
+import type { Bounds } from "@one-shot-ui/core";
 import type { AcceptedFix } from "./types.js";
 import type { TextOverlap } from "./fidelity.js";
 
@@ -16,6 +17,21 @@ import type { TextOverlap } from "./fidelity.js";
  */
 export function isBoxAffecting(source: string): boolean {
   return source.startsWith("geometry") || source.startsWith("typography");
+}
+
+/** Color fixes recolor surfaces and text; only these can recolor text into its background. */
+export function isColorFix(source: string): boolean {
+  return source.startsWith("color");
+}
+
+/** Does `outer` enclose `inner` (with a small tolerance)? Geometric ancestry. */
+export function containsBounds(outer: Bounds, inner: Bounds, tol = 2): boolean {
+  return (
+    outer.x <= inner.x + tol &&
+    outer.y <= inner.y + tol &&
+    outer.x + outer.width >= inner.x + inner.width - tol &&
+    outer.y + outer.height >= inner.y + inner.height - tol
+  );
 }
 
 /** Order-independent key for a pair of selectors. */
@@ -50,26 +66,45 @@ export function freshOverlapCulprits(
   return accepted.filter((f) => [...touched].some((sel) => affects(f, sel)));
 }
 
+/** A reference text block the build showed at baseline but no longer shows. */
+export interface LostBlock {
+  /** The impl element that held the content. */
+  selector: string;
+  bounds: Bounds;
+  /** gone = dropped from the render (ejected/collapsed); illegible = recolored into its background. */
+  reason: "gone" | "illegible";
+}
+
 /**
- * Accepted box-affecting fixes that DROPPED a reference text block the build was
- * showing at baseline. collectElements omits display:none / opacity:0 / off-screen
- * / sub-16px² nodes, so a fix that collapses or ejects text makes it vanish — and
- * pixel-diff rewards that (fewer pixels left to mismatch). `baselineMatches` maps
- * each baseline-present reference block (by its stable index) to the impl selector
- * that held it; `presentRefKeys` is the set of reference blocks still present now.
+ * Accepted fixes that caused reference content to stop showing — the failures a
+ * pixel diff rewards but a human never accepts. A GONE block was ejected or
+ * collapsed by a box-moving fix (collectElements omits display:none / opacity:0 /
+ * off-screen / sub-16px² nodes); an ILLEGIBLE block was recolored into its
+ * background by a color fix (the DOM node survives, so a presence check misses it
+ * — only contrast catches it).
  *
- * Limitation: attributes loss to a fix on the vanished element or an ancestor of
- * it. A fix on a *sibling* that pushed this element off-screen is not caught here
- * (rare in practice, and still surfaced in the fidelity report's contentRecall).
+ * Attribution is GEOMETRIC: the culprit fix targets the lost element itself or an
+ * element that encloses it (color inherits, container geometry cascades), which is
+ * robust to however collectElements minified the selector. `boundsOf` resolves a
+ * fix's selector to its current bounds.
  */
-export function missingContentCulprits(
-  baselineMatches: Map<number, string>,
-  presentRefKeys: Set<number>,
+export function lostContentCulprits(
+  lost: LostBlock[],
   accepted: AcceptedFix[],
+  boundsOf: (selector: string) => Bounds | undefined,
 ): AcceptedFix[] {
-  const lostSelectors = new Set<string>();
-  for (const [refIndex, sel] of baselineMatches) {
-    if (!presentRefKeys.has(refIndex)) lostSelectors.add(sel);
+  const out = new Set<AcceptedFix>();
+  for (const block of lost) {
+    const familyOk = block.reason === "illegible" ? isColorFix : isBoxAffecting;
+    for (const f of accepted) {
+      if (!familyOk(f.source)) continue;
+      if (f.selector === block.selector) {
+        out.add(f);
+        continue;
+      }
+      const fb = boundsOf(f.selector);
+      if (fb && containsBounds(fb, block.bounds)) out.add(f);
+    }
   }
-  return accepted.filter((f) => [...lostSelectors].some((sel) => affects(f, sel)));
+  return [...out];
 }

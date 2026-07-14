@@ -5,7 +5,8 @@ import type { AcceptedFix, ConvergeReport, MissingStructure } from "./types.js";
 import { collectElements } from "./inventory.js";
 import { matchElements, findMissingStructure, type ReferenceData } from "./matching.js";
 import { computeFidelity, detectTextOverlaps, assignTextBlocks, type FidelityInput } from "./fidelity.js";
-import { overlapKey, freshOverlapCulprits, missingContentCulprits } from "./gates.js";
+import { overlapKey, freshOverlapCulprits, lostContentCulprits, containsBounds, type LostBlock } from "./gates.js";
+import { contrastRatio, parseCssColor, type Rgb } from "./color.js";
 import type { ElementInfo } from "./types.js";
 import {
   candidatesFor,
@@ -143,9 +144,12 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
     const refInput = refDataToInput(opts.refData);
     const fidOpts = { canvasWidth: opts.viewport.width, canvasHeight: opts.viewport.height };
     // Reference text blocks (by stable index) the model was already showing at
-    // baseline, mapped to the impl selector that held each — the content the
-    // content gate refuses to let the optimizer hide.
-    let baselineTextMatches = new Map<number, string>();
+    // baseline — the selector that held each, its bounds, and whether it was
+    // legible then. The content gate refuses to let the optimizer hide any of these.
+    let baselineTextMatches = new Map<
+      number,
+      { selector: string; bounds: ElementInfo["bounds"]; legible: boolean }
+    >();
 
     progress(
       `initial mismatch ${formatRatio(initialPixels / objective.totalPixels)} (${initialPixels} px)`,
@@ -161,10 +165,18 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       if (passes === 1) {
         missingStructure = findMissingStructure(elements, opts.refData);
         baselineOverlaps = overlapKeys(elements);
+        const baseBySelector = new Map(elements.map((e) => [e.selector, e] as const));
         baselineTextMatches = new Map(
           assignTextBlocks(refInput, elementsToInput(elements), fidOpts).assignments
             .filter((a) => a.implLabel)
-            .map((a) => [a.refIndex, a.implLabel!] as const),
+            .map((a) => {
+              const el = baseBySelector.get(a.implLabel!);
+              const c = el ? textContrast(el, elements) : null;
+              return [
+                a.refIndex,
+                { selector: a.implLabel!, bounds: el?.bounds ?? a.implBlock.bounds, legible: c == null || c >= LEGIBLE_MIN },
+              ] as const;
+            }),
         );
       }
       if (opts.verboseTrials && passes === 1) {
@@ -364,14 +376,31 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       await reMeasureElements();
     }
 
-    // Gate 2 — content: revert fixes that hid or ejected reference text the build
-    // was showing at baseline, restoring content the pixel score can't see.
+    // Gate 2 — content: revert fixes that stopped showing reference text the build
+    // had at baseline — whether ejected/collapsed out of the render (a box fix) or
+    // recolored into its background (a color fix: invisible on screen, still in the
+    // DOM, so only a contrast check catches it). This is the failure pixel-diff
+    // rewards most — dark text whitened onto a light page drops mismatch to zero.
     let contentRestored = 0;
     for (let round = 0; round < 3; round++) {
-      const present = new Set(
-        assignTextBlocks(refInput, elementsToInput(finalElements), fidOpts).assignments.map((a) => a.refIndex),
-      );
-      const culprits = missingContentCulprits(baselineTextMatches, present, accepted);
+      const finalAssign = assignTextBlocks(refInput, elementsToInput(finalElements), fidOpts).assignments;
+      const presentByRef = new Map(finalAssign.map((a) => [a.refIndex, a.implLabel] as const));
+      const bySelector = new Map(finalElements.map((e) => [e.selector, e] as const));
+      const lost: LostBlock[] = [];
+      for (const [refIndex, base] of baselineTextMatches) {
+        const label = presentByRef.get(refIndex);
+        if (label == null) {
+          lost.push({ selector: base.selector, bounds: base.bounds, reason: "gone" });
+        } else if (base.legible) {
+          const el = bySelector.get(label);
+          const c = el ? textContrast(el, finalElements) : null;
+          if (el && c != null && c < ILLEGIBLE_MAX) {
+            lost.push({ selector: label, bounds: el.bounds, reason: "illegible" });
+          }
+        }
+      }
+      if (!lost.length) break;
+      const culprits = lostContentCulprits(lost, accepted, (sel) => bySelector.get(sel)?.bounds);
       if (!culprits.length) break;
       contentRestored += revert(culprits);
       await reMeasureElements();
@@ -438,6 +467,49 @@ function overlapItems(elements: ElementInfo[]): Array<{ text: string | null; bou
 
 function overlapKeys(elements: ElementInfo[]): Set<string> {
   return new Set(detectTextOverlaps(overlapItems(elements)).map((o) => overlapKey(o.a, o.b)));
+}
+
+// Text below ILLEGIBLE_MAX WCAG contrast against its background is effectively
+// invisible; a block needs at least LEGIBLE_MIN to count as "was legible" at
+// baseline. The gap is hysteresis so a block near the boundary can't flip-flop.
+const LEGIBLE_MIN = 3.0;
+const ILLEGIBLE_MAX = 2.0;
+const WHITE: Rgb = { r: 255, g: 255, b: 255 };
+
+/** Opaque background color of a computed-style string, or null if transparent/unset. */
+function opaqueBg(c: string | undefined): Rgb | null {
+  if (!c) return null;
+  const s = c.trim().toLowerCase();
+  if (s === "transparent") return null;
+  const rgba = s.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/);
+  if (rgba) {
+    const a = rgba[4] != null ? Number(rgba[4]) : 1;
+    if (a < 0.5) return null; // see-through: not the surface behind the text
+    return { r: Number(rgba[1]), g: Number(rgba[2]), b: Number(rgba[3]) };
+  }
+  return parseCssColor(c);
+}
+
+/** The surface rendered behind an element's text: its own opaque background, else
+ *  the nearest enclosing opaque surface, else the page default (white). */
+function effectiveBg(el: ElementInfo, elements: ElementInfo[]): Rgb {
+  const own = opaqueBg(el.styles.backgroundColor);
+  if (own) return own;
+  let best: { bg: Rgb; area: number } | null = null;
+  for (const o of elements) {
+    if (o === el || !containsBounds(o.bounds, el.bounds)) continue;
+    const bg = opaqueBg(o.styles.backgroundColor);
+    if (bg && (!best || o.area < best.area)) best = { bg, area: o.area };
+  }
+  return best ? best.bg : WHITE;
+}
+
+/** WCAG contrast of an element's text against its effective background, or null
+ *  when the text color is unknown (can't judge — treated as legible upstream). */
+function textContrast(el: ElementInfo, elements: ElementInfo[]): number | null {
+  const fg = parseCssColor(el.styles.color);
+  if (!fg) return null;
+  return contrastRatio(fg, effectiveBg(el, elements));
 }
 
 function refDataToInput(ref: ReferenceData): FidelityInput {

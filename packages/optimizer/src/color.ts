@@ -121,3 +121,20 @@ export function colorDelta(a: string | null | undefined, b: string | null | unde
   if (!ca || !cb) return Infinity;
   return deltaE2000(rgbToLab(ca), rgbToLab(cb));
 }
+
+/** WCAG relative luminance of an sRGB color, [0,1]. */
+export function relativeLuminance({ r, g, b }: Rgb): number {
+  return 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
+}
+
+/**
+ * WCAG contrast ratio between a foreground and background color, [1,21]. 1 = the
+ * colors are identical (text invisible against its background); higher = more
+ * legible. This is the signal for "did a recolor hide the text" that a pixel diff
+ * and a DOM-presence check both miss.
+ */
+export function contrastRatio(a: Rgb, b: Rgb): number {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}

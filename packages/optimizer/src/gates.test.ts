@@ -1,9 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import {
   isBoxAffecting,
+  isColorFix,
+  containsBounds,
   overlapKey,
   freshOverlapCulprits,
-  missingContentCulprits,
+  lostContentCulprits,
+  type LostBlock,
 } from "./gates.js";
 import type { AcceptedFix } from "./types.js";
 
@@ -14,6 +17,7 @@ const fix = (selector: string, property: string, source: string): AcceptedFix =>
   source,
   gainPixels: 10,
 });
+const box = (x: number, y: number, w: number, h: number) => ({ x, y, width: w, height: h });
 
 describe("isBoxAffecting", () => {
   it("flags geometry and typography, spares color and everything else", () => {
@@ -60,47 +64,58 @@ describe("freshOverlapCulprits", () => {
   });
 });
 
-describe("missingContentCulprits", () => {
-  // Baseline: ref block 0 was held by "div.card > p", block 1 by "div.panel > h2".
-  const baselineMatches = new Map<number, string>([
-    [0, "div.card > p"],
-    [1, "div.panel > h2"],
-  ]);
+describe("isColorFix / containsBounds", () => {
+  it("classifies color sources and geometric enclosure", () => {
+    expect(isColorFix("color:text")).toBe(true);
+    expect(isColorFix("geometry:offset")).toBe(false);
+    expect(containsBounds(box(0, 0, 100, 100), box(10, 10, 20, 20))).toBe(true);
+    expect(containsBounds(box(0, 0, 100, 100), box(90, 90, 40, 40))).toBe(false);
+  });
+});
 
-  it("reverts the box-affecting fix on a text block that VANISHED", () => {
-    const accepted = [
-      fix("div.card", "height", "geometry:container"), // ancestor of the lost block's holder
-      fix("div.panel > h2", "color", "color"),
-    ];
-    const present = new Set([1]); // block 0 lost
-    expect(missingContentCulprits(baselineMatches, present, accepted).map((f) => f.selector)).toEqual([
-      "div.card",
+describe("lostContentCulprits", () => {
+  // The card sits at (0,0,300,200); its text leaf at (20,20,100,20) is enclosed by it.
+  const leaf = { selector: "#t", bounds: box(20, 20, 100, 20) };
+  const boundsOf = (sel: string): ReturnType<typeof box> | undefined =>
+    ({ ".card": box(0, 0, 300, 200), "#t": box(20, 20, 100, 20) }[sel]);
+
+  it("blames the COLOR fix on an enclosing element for an ILLEGIBLE block", () => {
+    // The recolor was applied to the card; the text leaf inherited it and vanished.
+    const lost: LostBlock[] = [{ ...leaf, reason: "illegible" }];
+    const accepted = [fix(".card", "color", "color:text"), fix(".card", "width", "geometry:width")];
+    expect(lostContentCulprits(lost, accepted, boundsOf).map((f) => f.property)).toEqual(["color"]);
+  });
+
+  it("blames the BOX fix on an enclosing element for a GONE block", () => {
+    const lost: LostBlock[] = [{ ...leaf, reason: "gone" }];
+    const accepted = [fix(".card", "height", "geometry:container"), fix(".card", "color", "color:text")];
+    expect(lostContentCulprits(lost, accepted, boundsOf).map((f) => f.property)).toEqual(["height"]);
+  });
+
+  it("does not cross families: a color fix never repairs a GONE block", () => {
+    const lost: LostBlock[] = [{ ...leaf, reason: "gone" }];
+    expect(lostContentCulprits(lost, [fix(".card", "color", "color:text")], boundsOf)).toEqual([]);
+  });
+
+  it("does not cross families: a box fix never repairs an ILLEGIBLE block", () => {
+    const lost: LostBlock[] = [{ ...leaf, reason: "illegible" }];
+    expect(lostContentCulprits(lost, [fix(".card", "width", "geometry:width")], boundsOf)).toEqual([]);
+  });
+
+  it("blames a fix on the lost element itself", () => {
+    const lost: LostBlock[] = [{ ...leaf, reason: "illegible" }];
+    expect(lostContentCulprits(lost, [fix("#t", "color", "color:text")], boundsOf).map((f) => f.selector)).toEqual([
+      "#t",
     ]);
   });
 
-  it("does nothing when all baseline content is still present", () => {
-    const accepted = [fix("div.card", "height", "geometry:container")];
-    const present = new Set([0, 1]);
-    expect(missingContentCulprits(baselineMatches, present, accepted)).toEqual([]);
+  it("does not blame a fix on a non-enclosing element", () => {
+    const lost: LostBlock[] = [{ ...leaf, reason: "illegible" }];
+    const boundsOf2 = (sel: string) => ({ ".sidebar": box(400, 0, 100, 200) }[sel]);
+    expect(lostContentCulprits(lost, [fix(".sidebar", "color", "color:text")], boundsOf2)).toEqual([]);
   });
 
-  it("does not blame a color fix for missing content", () => {
-    const accepted = [fix("div.card > p", "color", "color")];
-    const present = new Set([1]); // block 0 lost
-    expect(missingContentCulprits(baselineMatches, present, accepted)).toEqual([]);
-  });
-
-  it("does not blame a box fix on an unrelated element", () => {
-    const accepted = [fix("div.footer", "margin", "geometry:offset")];
-    const present = new Set([1]); // block 0 lost, but no fix touches its subtree
-    expect(missingContentCulprits(baselineMatches, present, accepted)).toEqual([]);
-  });
-
-  it("reverts a fix on the vanished element ITSELF (e.g. font-size collapse)", () => {
-    const accepted = [fix("div.card > p", "font-size", "typography")];
-    const present = new Set([1]);
-    expect(missingContentCulprits(baselineMatches, present, accepted).map((f) => f.selector)).toEqual([
-      "div.card > p",
-    ]);
+  it("does nothing when no content was lost", () => {
+    expect(lostContentCulprits([], [fix(".card", "color", "color:text")], boundsOf)).toEqual([]);
   });
 });

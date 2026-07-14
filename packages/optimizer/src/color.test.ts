@@ -1,5 +1,19 @@
 import { describe, it, expect } from "bun:test";
-import { deltaE2000, rgbToLab, parseCssColor, colorDelta, type Lab } from "./color.js";
+import { deltaE2000, rgbToLab, parseCssColor, colorDelta, contrastRatio, type Lab } from "./color.js";
+
+describe("contrastRatio — WCAG", () => {
+  const W = { r: 255, g: 255, b: 255 };
+  const K = { r: 0, g: 0, b: 0 };
+  it("is 21 for black on white and 1 for identical colors (hidden text)", () => {
+    expect(contrastRatio(K, W)).toBeCloseTo(21, 0);
+    expect(contrastRatio(W, W)).toBeCloseTo(1, 5); // white text on white bg = invisible
+  });
+  it("is symmetric and drops below the legibility floor for near-background text", () => {
+    expect(contrastRatio(W, K)).toBeCloseTo(contrastRatio(K, W), 5);
+    // #f5f5f5 text on white — the kind of near-invisible recolor converge produces.
+    expect(contrastRatio({ r: 245, g: 245, b: 245 }, W)).toBeLessThan(2);
+  });
+});
 
 describe("deltaE2000 — canonical Sharma test vectors", () => {
   // From Sharma, Wu & Dalal (2005), "The CIEDE2000 Color-Difference Formula".
