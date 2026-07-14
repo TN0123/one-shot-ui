@@ -147,6 +147,11 @@ describe("converge (integration)", () => {
       for (const fix of report.accepted) {
         expect(report.patchCss.includes(`${fix.property}: ${fix.value}`)).toBe(true);
       }
+      // The converged build keeps all content and scores high on fidelity — the
+      // pixel win did NOT come at the cost of hidden/overlapping text.
+      expect(report.contentRestored).toBeGreaterThanOrEqual(0);
+      expect(report.fidelity.contentRecall).toBe(1);
+      expect(report.fidelity.score).toBeGreaterThan(85);
     },
     240_000,
   );
@@ -171,6 +176,12 @@ describe("converge (integration)", () => {
       expect(report.accepted.length).toBe(0);
       expect(report.finalMismatchRatio).toBeLessThanOrEqual(0.002);
       expect(report.verdict).toBe("pixel-converged");
+      // Structural gates are no-ops on a faithful build, and fidelity is high.
+      expect(report.overlapsRepaired).toBe(0);
+      expect(report.contentRestored).toBe(0);
+      expect(report.fidelity.contentRecall).toBe(1);
+      expect(report.fidelity.gates.contentComplete).toBe(true);
+      expect(report.fidelity.score).toBeGreaterThan(90);
     },
     120_000,
   );

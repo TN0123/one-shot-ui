@@ -4,6 +4,9 @@ import { chromium, type Browser, type Page } from "playwright";
 import type { AcceptedFix, ConvergeReport, MissingStructure } from "./types.js";
 import { collectElements } from "./inventory.js";
 import { matchElements, findMissingStructure, type ReferenceData } from "./matching.js";
+import { computeFidelity, detectTextOverlaps, assignTextBlocks, type FidelityInput } from "./fidelity.js";
+import { overlapKey, freshOverlapCulprits, missingContentCulprits } from "./gates.js";
+import type { ElementInfo } from "./types.js";
 import {
   candidatesFor,
   containerCandidates,
@@ -25,6 +28,15 @@ import {
 } from "./trial.js";
 
 export type { ReferenceData } from "./matching.js";
+export {
+  computeFidelity,
+  detectTextOverlaps,
+  type FidelityInput,
+  type FidelityBreakdown,
+  type FidelityOptions,
+  type TextOverlap,
+} from "./fidelity.js";
+export { colorDelta, deltaE2000, rgbToLab, parseCssColor } from "./color.js";
 export type {
   ConvergeReport,
   AcceptedFix,
@@ -121,6 +133,19 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
     let triedAndRejected = new Set<string>();
     let budgetHit = false;
     let missingStructure: MissingStructure[] = [];
+    // Text overlaps present in the model's raw output. The gate only reverts
+    // overlaps converge *introduces*, never ones it inherited (those are the
+    // model's to fix, not the optimizer's).
+    let baselineOverlaps = new Set<string>();
+    // Reference text/layout in fidelity's shape + the shared canvas opts, built
+    // once and reused for the baseline content snapshot, the content gate, and
+    // the final fidelity score.
+    const refInput = refDataToInput(opts.refData);
+    const fidOpts = { canvasWidth: opts.viewport.width, canvasHeight: opts.viewport.height };
+    // Reference text blocks (by stable index) the model was already showing at
+    // baseline, mapped to the impl selector that held each — the content the
+    // content gate refuses to let the optimizer hide.
+    let baselineTextMatches = new Map<number, string>();
 
     progress(
       `initial mismatch ${formatRatio(initialPixels / objective.totalPixels)} (${initialPixels} px)`,
@@ -135,6 +160,12 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       const matched = matchElements(elements, opts.refData);
       if (passes === 1) {
         missingStructure = findMissingStructure(elements, opts.refData);
+        baselineOverlaps = overlapKeys(elements);
+        baselineTextMatches = new Map(
+          assignTextBlocks(refInput, elementsToInput(elements), fidOpts).assignments
+            .filter((a) => a.implLabel)
+            .map((a) => [a.refIndex, a.implLabel!] as const),
+        );
       }
       if (opts.verboseTrials && passes === 1) {
         for (const m of matched) {
@@ -302,10 +333,65 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       if (acceptedThisPass === 0) break;
     }
 
+    // Structural gates: after the pixel loop, undo box-moving fixes that "won"
+    // pixels by making the build worse in ways pixel-diff can't see — text shoved
+    // onto a neighbor (overlap) or collapsed/ejected out of the render (missing
+    // content). Both surface in the live inventory: collectElements omits
+    // hidden/off-screen/sub-16px² nodes, so lost content simply disappears.
+    let finalElements = await collectElements(page, maxElements);
+    const revert = (culprits: AcceptedFix[]): number => {
+      for (const f of culprits) {
+        rules.get(f.selector)?.delete(f.property);
+        if (rules.get(f.selector)?.size === 0) rules.delete(f.selector);
+        const idx = accepted.indexOf(f);
+        if (idx >= 0) accepted.splice(idx, 1);
+      }
+      return culprits.length;
+    };
+    const reMeasureElements = async () => {
+      await bank.setRules(rules);
+      await page.waitForTimeout(60); // settle re-render before re-measuring, matches trialCandidate
+      finalElements = await collectElements(page, maxElements);
+    };
+
+    // Gate 1 — overlap: revert fixes that shoved text onto a neighbor.
+    let overlapsRepaired = 0;
+    for (let round = 0; round < 3; round++) {
+      const overlaps = detectTextOverlaps(overlapItems(finalElements));
+      const culprits = freshOverlapCulprits(overlaps, baselineOverlaps, accepted);
+      if (!culprits.length) break;
+      overlapsRepaired += revert(culprits);
+      await reMeasureElements();
+    }
+
+    // Gate 2 — content: revert fixes that hid or ejected reference text the build
+    // was showing at baseline, restoring content the pixel score can't see.
+    let contentRestored = 0;
+    for (let round = 0; round < 3; round++) {
+      const present = new Set(
+        assignTextBlocks(refInput, elementsToInput(finalElements), fidOpts).assignments.map((a) => a.refIndex),
+      );
+      const culprits = missingContentCulprits(baselineTextMatches, present, accepted);
+      if (!culprits.length) break;
+      contentRestored += revert(culprits);
+      await reMeasureElements();
+    }
+
+    if (overlapsRepaired > 0 || contentRestored > 0) {
+      currentPixels = await objective.measure();
+      const parts: string[] = [];
+      if (overlapsRepaired > 0) parts.push(`${overlapsRepaired} overlap-inducing`);
+      if (contentRestored > 0) parts.push(`${contentRestored} content-dropping`);
+      progress(`structural gate: reverted ${parts.join(" + ")} fix(es)`);
+    }
+    const residualTextOverlaps = detectTextOverlaps(overlapItems(finalElements)).length;
+
     const finalPixels = currentPixels;
     const finalRatio = finalPixels / objective.totalPixels;
     const verdict: ConvergeReport["verdict"] =
       finalRatio <= floorRatio ? "pixel-converged" : budgetHit ? "budget-exhausted" : "css-exhausted";
+
+    const fidelity = computeFidelity(refInput, elementsToInput(finalElements), fidOpts);
 
     return {
       initialMismatchRatio: initialPixels / objective.totalPixels,
@@ -319,11 +405,60 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       missingStructure,
       verdict,
       patchCss: buildPatchCss(accepted),
+      overlapsRepaired,
+      contentRestored,
+      residualTextOverlaps,
+      fidelity,
     };
   } finally {
     await context.close();
     if (ownBrowser) await browser.close();
   }
+}
+
+const strictlyContains = (o: ElementInfo["bounds"], i: ElementInfo["bounds"]): boolean =>
+  o.x <= i.x && o.y <= i.y && o.x + o.width >= i.x + i.width && o.y + o.height >= i.y + i.height &&
+  o.width * o.height > i.width * i.height;
+
+/**
+ * Only LEAF text elements are real text runs. A container's innerText bubbles up
+ * from its children, so a card reads as one big "text" box covering all its lines
+ * — a phantom that both false-flags overlaps AND mismatches the reference, whose
+ * extract reports tight per-run boxes. Dropping any text element that strictly
+ * contains another leaves the actual lines, matching the reference's granularity.
+ */
+function leafTextElements(elements: ElementInfo[]): ElementInfo[] {
+  const textEls = elements.filter((e) => e.text);
+  return textEls.filter((e) => !textEls.some((o) => o !== e && strictlyContains(e.bounds, o.bounds)));
+}
+
+function overlapItems(elements: ElementInfo[]): Array<{ text: string | null; bounds: ElementInfo["bounds"]; label: string }> {
+  return leafTextElements(elements).map((e) => ({ text: e.text, bounds: e.bounds, label: e.selector }));
+}
+
+function overlapKeys(elements: ElementInfo[]): Set<string> {
+  return new Set(detectTextOverlaps(overlapItems(elements)).map((o) => overlapKey(o.a, o.b)));
+}
+
+function refDataToInput(ref: ReferenceData): FidelityInput {
+  return {
+    layout: ref.layout.map((l) => ({ bounds: l.bounds, fill: l.fill })),
+    text: ref.text.map((t) => ({ text: t.text, bounds: t.bounds, color: t.color })),
+  };
+}
+
+function elementsToInput(elements: ElementInfo[]): FidelityInput {
+  return {
+    layout: elements.map((e) => ({ bounds: e.bounds, fill: e.styles.backgroundColor ?? null })),
+    // Leaf text runs only — same granularity as the reference extract, so overlap
+    // detection and matching aren't fooled by containers' bubbled-up innerText.
+    text: leafTextElements(elements).map((e) => ({
+      text: e.text!,
+      bounds: e.bounds,
+      color: e.styles.color ?? null,
+      label: e.selector,
+    })),
+  };
 }
 
 function parsePxStyle(s: string | undefined): number | null {

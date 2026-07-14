@@ -74,4 +74,12 @@ export interface ConvergeReport {
   missingStructure: MissingStructure[];
   verdict: "pixel-converged" | "css-exhausted" | "budget-exhausted";
   patchCss: string;
+  /** Box-moving fixes reverted because they introduced text overlap (the legibility gate). */
+  overlapsRepaired: number;
+  /** Box-moving fixes reverted because they hid/ejected reference text (the content gate). */
+  contentRestored: number;
+  /** Text overlaps still present after repair (pre-existing in the impl, or unfixable via CSS). */
+  residualTextOverlaps: number;
+  /** Structural fidelity of the final build vs the reference (see fidelity.ts). */
+  fidelity: import("./fidelity.js").FidelityBreakdown;
 }

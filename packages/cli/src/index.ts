@@ -40,6 +40,7 @@ import { extractText } from "@one-shot-ui/vision-text";
 import { labelNodes } from "@one-shot-ui/semantic-label";
 import { compareDomToExtract, extractDomTree } from "@one-shot-ui/dom-diff";
 import { resolveFixTarget, inferCssCategory } from "./fix-target.js";
+import { sortFixesByHumanSeverity } from "./fix-priority.js";
 import { resolveMatchReferenceViewport } from "./match-reference.js";
 import { converge, type ReferenceData } from "@one-shot-ui/optimizer";
 
@@ -1418,6 +1419,13 @@ Examples:
     const pct = (r: number) => `${(r * 100).toFixed(2)}%`;
     console.log(`Verdict: ${result.verdict} — ${pct(result.finalMismatchRatio)} mismatch (was ${pct(result.initialMismatchRatio)})`);
     console.log(`Accepted ${result.accepted.length} fixes, rejected ${result.rejectedCount} (${result.evals} trials, ${result.passes} passes)`);
+    // Fidelity is the structural score pixels can't see (content present + placed +
+    // no overlap). A low % here with a good pixel verdict = pixels were gamed.
+    const f = result.fidelity;
+    console.log(`Fidelity: ${f.score.toFixed(1)}/100 (content ${(f.contentRecall * 100).toFixed(0)}% present, ${f.overlapCount} text overlaps)`);
+    if (result.overlapsRepaired || result.contentRestored) {
+      console.log(`Structural gate: reverted ${result.overlapsRepaired} overlap-inducing + ${result.contentRestored} content-dropping fix(es)`);
+    }
     console.log(`Patch: ${outPath}`);
     if (result.accepted.length) {
       console.log("");
@@ -1642,6 +1650,11 @@ program
       }
     }
 
+    // Re-order by what humans actually notice (missing content / overlap / layout
+    // first), not by pixel weight — Design2Code's human-preference finding. Reorders
+    // only; never adds or drops a fix.
+    const orderedFixes = sortFixesByHumanSeverity(fixes);
+
     // Force-surface suggestions when zero actionable fixes remain but reducible mismatch > 0.5%
     let forceSurfaced: typeof fixes = [];
     if (fixes.length === 0 && report.summary.segmented?.irreducibleEstimate != null) {
@@ -1676,7 +1689,7 @@ program
     }
 
     if (options.json) {
-      const jsonOutput: any = { version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...fixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] };
+      const jsonOutput: any = { version: VERSION, framework: useTailwind ? "react" : "vanilla", styling: useTailwind ? "tailwind" : "css", fixes: [...orderedFixes, ...forceSurfaced.map(f => ({ ...f, forceSurfaced: true }))] };
       if (structuralWarning) jsonOutput.structuralWarning = structuralWarning;
       console.log(JSON.stringify(jsonOutput, null, 2));
       return;
@@ -1687,8 +1700,8 @@ program
     }
 
     const filteredCount = allFixes.length - fixes.length;
-    console.log(`${fixes.length} suggested fixes (ordered by priority)${filteredCount > 0 ? ` (${filteredCount} low-confidence noise items filtered)` : ""}:\n`);
-    for (const fix of fixes) {
+    console.log(`${orderedFixes.length} suggested fixes (ordered by human-perceived severity)${filteredCount > 0 ? ` (${filteredCount} low-confidence noise items filtered)` : ""}:\n`);
+    for (const fix of orderedFixes) {
       const resolvedFixAnchor = fix.anchorName ? applySemanticLabels(fix.anchorName, sfLabelMap) : undefined;
       const label = resolvedFixAnchor ? `${resolvedFixAnchor} · ` : "";
       const resolvedDesc = applySemanticLabels(fix.description, sfLabelMap);
