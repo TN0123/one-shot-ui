@@ -72,6 +72,30 @@ function collectElementsInPage(styleKeys: string[], maxElements: number): Elemen
     }
     return d;
   }
+  // Is this element's text cut off by an overflow box (on itself or an ancestor)?
+  // Deterministic — scrollSize vs clientSize under a clipping overflow, no OCR, no
+  // pixel hit-testing. (Occlusion — text painted over by an opaque overlay — is a
+  // plausible but unobserved failure; a reliable detector needs glyph-level, not
+  // single-point, testing, so it is intentionally not attempted here. Add one when
+  // a real occlusion case appears. ponytail: clip-only, add occlude when data shows it.)
+  function hiddenReason(el: Element, r: DOMRect): "clip" | null {
+    const CLIP = ["hidden", "clip", "scroll", "auto"];
+    let node: Element | null = el;
+    while (node && node !== document.documentElement) {
+      const s = window.getComputedStyle(node);
+      const clipY = CLIP.indexOf(s.overflowY) >= 0 && node.scrollHeight > node.clientHeight + 2;
+      const clipX = CLIP.indexOf(s.overflowX) >= 0 && node.scrollWidth > node.clientWidth + 2;
+      if (clipY || clipX) {
+        if (node === el) return "clip";
+        const nr = node.getBoundingClientRect();
+        // An ancestor clips THIS text only if the text box spills past its client area.
+        if (r.top < nr.top - 2 || r.bottom > nr.bottom + 2 || r.left < nr.left - 2 || r.right > nr.right + 2)
+          return "clip";
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
   const skipTags = ["SCRIPT", "STYLE", "LINK", "META", "NOSCRIPT", "BR", "HEAD", "TITLE"];
   const out: ElementInfo[] = [];
   const all = document.body ? Array.from(document.body.querySelectorAll("*")) : [];
@@ -100,6 +124,7 @@ function collectElementsInPage(styleKeys: string[], maxElements: number): Elemen
       depth: depthOf(el),
       text: text.length ? text : null,
       styles,
+      hidden: text.length ? hiddenReason(el, r) : null,
     });
   }
   // Keep the largest elements when over the cap…

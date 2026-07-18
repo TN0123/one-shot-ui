@@ -179,6 +179,9 @@ describe("converge (integration)", () => {
       // Structural gates are no-ops on a faithful build, and fidelity is high.
       expect(report.overlapsRepaired).toBe(0);
       expect(report.contentRestored).toBe(0);
+      // A faithful build hides no reference text — the clip/occlude detector must
+      // not false-flag legible on-screen content.
+      expect(report.hiddenContent).toEqual([]);
       expect(report.fidelity.contentRecall).toBe(1);
       expect(report.fidelity.gates.contentComplete).toBe(true);
       expect(report.fidelity.score).toBeGreaterThan(90);

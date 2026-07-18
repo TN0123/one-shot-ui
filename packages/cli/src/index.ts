@@ -1426,6 +1426,14 @@ Examples:
     if (result.overlapsRepaired || result.contentRestored) {
       console.log(`Structural gate: reverted ${result.overlapsRepaired} overlap-inducing + ${result.contentRestored} content-dropping fix(es)`);
     }
+    if (result.hiddenContent.length) {
+      console.log("");
+      console.log(`Hidden content (${result.hiddenContent.length}) — reference text rendered but clipped out of view; pixels can't fix this, remove the overflow/fixed-size that cuts it off:`);
+      for (const h of result.hiddenContent) {
+        const snip = h.refText.length > 60 ? h.refText.slice(0, 57) + "…" : h.refText;
+        console.log(`  - [${h.mechanism}] ${h.selector}: "${snip}"`);
+      }
+    }
     console.log(`Patch: ${outPath}`);
     if (result.accepted.length) {
       console.log("");

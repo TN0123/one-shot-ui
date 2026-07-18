@@ -14,6 +14,12 @@ export interface ElementInfo {
   text: string | null;
   /** Computed-style subset keyed by camelCase property. */
   styles: Record<string, string>;
+  /**
+   * How this element's text is hidden from view despite being in the DOM:
+   * "clip" (cut off by an overflow box) or null/undefined when visible. Set by
+   * collectElements in the browser.
+   */
+  hidden?: "clip" | null;
 }
 
 export interface MatchedRegion {
@@ -80,6 +86,8 @@ export interface ConvergeReport {
   contentRestored: number;
   /** Text overlaps still present after repair (pre-existing in the impl, or unfixable via CSS). */
   residualTextOverlaps: number;
+  /** Reference text the build renders but hides (clipped/occluded); CSS can't fix it — build must. */
+  hiddenContent: import("./hidden-content.js").HiddenBlock[];
   /** Structural fidelity of the final build vs the reference (see fidelity.ts). */
   fidelity: import("./fidelity.js").FidelityBreakdown;
 }

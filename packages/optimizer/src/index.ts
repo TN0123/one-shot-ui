@@ -7,6 +7,8 @@ import { matchElements, findMissingStructure, type ReferenceData } from "./match
 import { computeFidelity, detectTextOverlaps, assignTextBlocks, type FidelityInput } from "./fidelity.js";
 import { overlapKey, freshOverlapCulprits, lostContentCulprits, containsBounds, type LostBlock } from "./gates.js";
 import { contrastRatio, parseCssColor, type Rgb } from "./color.js";
+import { visibleLeafText } from "./text-elements.js";
+import { hiddenContentBlocks } from "./hidden-content.js";
 import type { ElementInfo } from "./types.js";
 import {
   candidatesFor,
@@ -38,6 +40,8 @@ export {
   type TextOverlap,
 } from "./fidelity.js";
 export { colorDelta, deltaE2000, rgbToLab, parseCssColor } from "./color.js";
+export { hiddenContentBlocks, type HiddenBlock } from "./hidden-content.js";
+export { leafTextElements, visibleLeafText } from "./text-elements.js";
 export type {
   ConvergeReport,
   AcceptedFix,
@@ -421,6 +425,10 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       finalRatio <= floorRatio ? "pixel-converged" : budgetHit ? "budget-exhausted" : "css-exhausted";
 
     const fidelity = computeFidelity(refInput, elementsToInput(finalElements), fidOpts);
+    // Reference text the final build renders but clips out of view. CSS can't fix it
+    // — un-clipping grows the box and worsens the pixels — so it is reported for the
+    // agent to fix in markup, alongside missingStructure.
+    const hiddenContent = hiddenContentBlocks(refInput, finalElements, fidOpts);
 
     return {
       initialMismatchRatio: initialPixels / objective.totalPixels,
@@ -437,6 +445,7 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
       overlapsRepaired,
       contentRestored,
       residualTextOverlaps,
+      hiddenContent,
       fidelity,
     };
   } finally {
@@ -445,24 +454,10 @@ export async function converge(opts: ConvergeOptions): Promise<ConvergeReport> {
   }
 }
 
-const strictlyContains = (o: ElementInfo["bounds"], i: ElementInfo["bounds"]): boolean =>
-  o.x <= i.x && o.y <= i.y && o.x + o.width >= i.x + i.width && o.y + o.height >= i.y + i.height &&
-  o.width * o.height > i.width * i.height;
-
-/**
- * Only LEAF text elements are real text runs. A container's innerText bubbles up
- * from its children, so a card reads as one big "text" box covering all its lines
- * — a phantom that both false-flags overlaps AND mismatches the reference, whose
- * extract reports tight per-run boxes. Dropping any text element that strictly
- * contains another leaves the actual lines, matching the reference's granularity.
- */
-function leafTextElements(elements: ElementInfo[]): ElementInfo[] {
-  const textEls = elements.filter((e) => e.text);
-  return textEls.filter((e) => !textEls.some((o) => o !== e && strictlyContains(e.bounds, o.bounds)));
-}
-
 function overlapItems(elements: ElementInfo[]): Array<{ text: string | null; bounds: ElementInfo["bounds"]; label: string }> {
-  return leafTextElements(elements).map((e) => ({ text: e.text, bounds: e.bounds, label: e.selector }));
+  // Visible leaf runs only — a clipped/occluded run isn't on screen, so it can't
+  // visually collide with anything.
+  return visibleLeafText(elements).map((e) => ({ text: e.text, bounds: e.bounds, label: e.selector }));
 }
 
 function overlapKeys(elements: ElementInfo[]): Set<string> {
@@ -522,9 +517,10 @@ function refDataToInput(ref: ReferenceData): FidelityInput {
 function elementsToInput(elements: ElementInfo[]): FidelityInput {
   return {
     layout: elements.map((e) => ({ bounds: e.bounds, fill: e.styles.backgroundColor ?? null })),
-    // Leaf text runs only — same granularity as the reference extract, so overlap
-    // detection and matching aren't fooled by containers' bubbled-up innerText.
-    text: leafTextElements(elements).map((e) => ({
+    // VISIBLE leaf text runs only — same granularity as the reference extract, and
+    // clipped/occluded runs (in the DOM but off screen) don't count as present, so
+    // recall reflects what a human actually reads.
+    text: visibleLeafText(elements).map((e) => ({
       text: e.text!,
       bounds: e.bounds,
       color: e.styles.color ?? null,
