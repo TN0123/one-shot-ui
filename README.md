@@ -43,6 +43,7 @@ The `run` command loops **extract → capture → compare → fix** until the he
 - **Deterministic, not vibes.** Stable pixel + structural diff scores — same input, same numbers — so you can gate CI on "is this pixel-close enough?"
 - **Exact fixes, not nudges.** It returns concrete CSS (`width: 616px`, `#303040`, `gap: 176px`), grouped by component and ranked by visual impact.
 - **Structural, not just pixels.** Detects missing/extra elements, position & size shifts, color, shadow, spacing, and typography — and labels which differences are *irreducible* (anti-aliasing, photographic content) so agents don't chase ghosts.
+- **Not gameable.** `converge` scores structural **fidelity** — is the reference's content present, placed, and legible? — not just pixel mismatch, and it refuses to win pixels by hiding, overlapping, or recoloring text into its background. It even flags reference text your build renders but **clips out of view** (a fixed-height `overflow:hidden` box) — the failure a pixel diff *rewards*, because cropped text lowers the mismatch.
 - **Agent-native.** Ships an `AGENTS.md` (auto-discovered by Claude Code, Cursor, Codex, …) plus a Claude Code skill, so your agent drives it without hand-holding.
 - **Local & private.** Pixel diffing, OCR, and layout extraction all run on your machine. No images leave your box, no API keys.
 
@@ -82,7 +83,8 @@ one-shot-ui compare reference.png build.png --json --heatmap heatmap.png
 one-shot-ui suggest-fixes reference.png build.png --json
 
 # The step that gets you pixel-perfect: trial fixes in a live browser and keep
-# only the ones that provably reduce pixel mismatch — outputs a verified patch
+# only the ones that provably reduce pixel mismatch — outputs a verified patch,
+# a structural fidelity score, and any reference text your build hides or clips
 one-shot-ui converge reference.png --impl ./index.html
 
 # Or run the full automated loop until it converges
@@ -138,7 +140,7 @@ See [docs/MCP.md](./docs/MCP.md) for per-client setup and registry publishing.
 | `plan` | Generate an implementation strategy | `--json` |
 | `capture` | Screenshot a URL or local HTML file | `--url`, `--file`, `--output` |
 | `suggest-fixes` | Tailwind/CSS fix suggestions from a diff | `--json`, `--top`, `--dom-diff`, `--framework` |
-| `converge` | Closed-loop optimizer: pixel-verified CSS patch | `--impl`, `--out`, `--json`, `--budget-seconds` |
+| `converge` | Closed-loop optimizer: pixel-verified CSS patch + structural fidelity score, flags hidden/clipped text | `--impl`, `--out`, `--json`, `--budget-seconds` |
 | `run` | Multi-pass extract→capture→compare→fix loop | `--impl`, `--max-passes`, `--threshold` |
 | `benchmark` | Run benchmark suites | `--json`, `--output` |
 

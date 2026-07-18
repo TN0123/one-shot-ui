@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.12.0 — fidelity: score what pixels can't see, and catch text a build hides
+
+A low pixel-mismatch can hide a build that a human would reject on sight — text shoved
+onto its neighbor, collapsed out of the render, recolored into its own background, or
+cropped out of view by a fixed-size box. Worse, a pixel objective *rewards* some of these:
+cropping a paragraph to two lines lowers the mismatch. This release makes `converge`
+optimize for what a reader actually sees, not just the pixel score.
+
+### `converge` now reports a structural **fidelity** score
+
+Alongside the pixel verdict, the report carries a `fidelity` breakdown: is the reference's
+content present, placed, and legible? Text blocks are matched by **content**, not pixels
+(offset-robust), and scored on Design2Code's human-preference weights — content recall and
+position dominate, color is perceptual (CIEDE2000). A build can be a 2% pixel match and a
+30/100 fidelity; that gap is the tell that pixels were gamed. The CLI prints a `Fidelity:`
+line; the JSON gains `.fidelity`.
+
+### Structural gates that refuse to win pixels by wrecking the layout
+
+After the pixel loop, `converge` reverts fixes that "won" pixels in ways a diff can't see:
+
+- **overlap gate** — undoes a box fix that shoved text onto a neighbor.
+- **content gate** — undoes a box fix that ejected or collapsed reference text out of the
+  render, and a color fix that recolored text below a WCAG-contrast floor against its
+  background (invisible on screen, still in the DOM — only a contrast check catches it).
+
+Reverted counts surface as `overlapsRepaired` / `contentRestored`.
+
+### Catches reference text a build renders but **clips out of view**
+
+The remaining blind spot: text that's in the DOM, on-screen, and high-contrast, but cropped
+by a fixed-height `overflow:hidden` box — a pixel diff *rewards* it and a contrast check
+can't see it. `converge` now measures visibility directly in the browser
+(`scrollHeight > clientHeight` under a clipping overflow — **deterministic, no OCR**) and
+reports each clipped run in `hiddenContent[]` by selector and text. It can't fix this with
+CSS (un-clipping grows the box and worsens the pixels, which is exactly why pixels miss it),
+so it reports it for the agent to fix in markup — like `missingStructure`. Fidelity and
+recall now count only visible text, so the score reflects what a reader sees.
+
+`suggest-fixes` also reorders its output by human-perceived severity (content and position
+before sub-pixel color), so the fixes an agent applies first are the ones that matter most.
+
 ## 0.11.0 — style transfer: extract a design language, verify a new UI conforms
 
 Until now the tool answered one question: *does this build match this exact screen?*
